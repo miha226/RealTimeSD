@@ -11,9 +11,19 @@ import torch
 import os
 from fastapi import FastAPI, WebSocket
 from fastapi.websockets import WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 
 
 app  = FastAPI()
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust this to your needs
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 #################
 ################# CONSTANTS
 #################
@@ -185,10 +195,10 @@ def run_lcm_or_sdxl():
 ###
 ### RUN SCRIPT
 ###
-@app.on_event("startup")
-async def startup_event():
-    print("FastAPI application has started.")
-    prepare_lcm_controlnet_or_sdxlturbo_pipeline()
+#@app.on_event("startup")
+#async def startup_event():
+#    print("FastAPI application has started.")
+#    prepare_lcm_controlnet_or_sdxlturbo_pipeline()
 
 
 @app.websocket("/ws")
@@ -196,26 +206,41 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
+            # Receive the frame as bytes from the client
             data = await websocket.receive_bytes()
-            # Convert bytes data to numpy array
+
+            # Debugging: Check if any data is received
+            print(f"Received {len(data)} bytes from the client.")
+
+            # Convert the received bytes to a numpy array
             nparr = np.frombuffer(data, np.uint8)
-            # Decode image
+
+            # Decode the numpy array to an image (OpenCV)
             frame = cv.imdecode(nparr, cv.IMREAD_COLOR)
 
-            # Convert the frame to grayscale
+            # Check if the frame is valid
+            if frame is None:
+                print("Received an invalid image frame")
+                continue
+
+            # Process the frame (e.g., convert to grayscale)
             gray_frame = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
 
-            # Encode the grayscale image to bytes
+            # Encode the processed frame back to JPEG format
             _, buffer = cv.imencode('.jpg', gray_frame)
-            result_bytes = buffer.tobytes()
 
-            # Send the processed image back to the client
-            await websocket.send_bytes(result_bytes)
+            # Debugging: Check the size of the processed frame
+            print(f"Sending {len(buffer)} bytes back to the client.")
+
+            # Send the processed frame back to the client
+            await websocket.send_bytes(buffer.tobytes())
+
     except WebSocketDisconnect:
         print("Client disconnected")
+    except Exception as e:
+        print(f"Error: {e}")
     finally:
         await websocket.close()
-
 
 
 
