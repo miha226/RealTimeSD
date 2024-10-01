@@ -28,6 +28,13 @@ app.add_middleware(
 ################# CONSTANTS
 #################
 
+
+# Global variables to hold models
+pipeline = None
+processor = None
+run_model = None
+
+
 # DEFAULT_PROMPT                = "portrait of adult pikachu monster, in the style of pixar movie, pikachu face, pokemon" #van gogh in the style of van gogh"
 # DEFAULT_PROMPT                = "pikachu, pokemon, wizard hat, style of pixar movie, Disney, 8k" #van gogh in the style of van gogh"
 DEFAULT_PROMPT                = "portrait of a minion, wearing goggles, yellow skin, wearing a beanie, despicable me movie, in the style of pixar movie" #van gogh in the style of van gogh"
@@ -129,76 +136,79 @@ def run_sdxlturbo(pipeline,ref_image):
                         
     return gen_image
 
+    # def run_lcm_or_sdxl():
+    # 
+    #     ###
+    #     ### PREPARE MODELS
+    #     ###
+    # 
+    #     pipeline  = prepare_lcm_controlnet_or_sdxlturbo_pipeline()
+    #     
+    #     processor  = process_lcm if MODEL=="lcm" else process_sdxlturbo
+    # 
+    #     run_model  = run_lcm if MODEL=="lcm" else run_sdxlturbo
+    # 
+    #     ###
+    #     ### PREPARE WEBCAM 
+    #     ###
+    # 
+    #     # Open a connection to the webcam
+    #     cap = cv.VideoCapture(0)
+    # 
+    #     CAP_WIDTH  = cap.get(cv.CAP_PROP_FRAME_WIDTH)  #320
+    #     CAP_HEIGHT = cap.get(cv.CAP_PROP_FRAME_HEIGHT) #240
+    # 
+    #     cap.set(cv.CAP_PROP_FRAME_WIDTH, CAP_WIDTH/2) 
+    #     cap.set(cv.CAP_PROP_FRAME_HEIGHT, CAP_HEIGHT/2)
+    # 
+    #     ###
+    #     ### RUN WEBCAM AND DIFFUSION
+    #     ###
+    # 
+    #     while True:
+    #         # Read a frame from the webcam
+    #         ret, image = cap.read()
+    # 
+    #         # break if cap returns false
+    #         if not ret:
+    #             print("Error: Failed to capture frame.")
+    #             break
+    #     
+    #         # Calculate the center position for the black and white filter
+    #         center_x = (image.shape[1] - WIDTH) // 2
+    #         center_y = (image.shape[0] - HEIGHT) // 2
+    # 
+    #         result_image, masked_image = get_result_and_mask(image, center_x, center_y, WIDTH, HEIGHT)
+    # 
+    #         numpy_image = processor(masked_image)
+    #         pil_image   = convert_numpy_image_to_pil_image(numpy_image)
+    #         pil_image   = run_model(pipeline, pil_image)
+    # 
+    #         result_image[center_y:center_y+HEIGHT, center_x:center_x+WIDTH] = cv.cvtColor(np.array(pil_image), cv.COLOR_RGB2BGR)
+    # 
+    #         # Display the resulting frame
+    #         cv.imshow("output", result_image)
+    # 
+    #         # Break the loop when 'q' key is pressed
+    #         if cv.waitKey(1) & 0xFF == ord('q'):
+    #             break
+    # 
+    #     # Release the webcam and close all windows
+    #     cap.release()
+    #     cv.destroyAllWindows()
 
+@app.on_event("startup")
+async def startup_event():
+    global pipeline, processor, run_model
 
-def run_lcm_or_sdxl():
+    print("FastAPI application is starting... Loading models into GPU.")
+    # Load the models into GPU when the server starts
+    pipeline = prepare_lcm_controlnet_or_sdxlturbo_pipeline()
 
-    ###
-    ### PREPARE MODELS
-    ###
-
-    pipeline  = prepare_lcm_controlnet_or_sdxlturbo_pipeline()
-    
-    processor  = process_lcm if MODEL=="lcm" else process_sdxlturbo
-
-    run_model  = run_lcm if MODEL=="lcm" else run_sdxlturbo
-
-    ###
-    ### PREPARE WEBCAM 
-    ###
-
-    # Open a connection to the webcam
-    cap = cv.VideoCapture(0)
-
-    CAP_WIDTH  = cap.get(cv.CAP_PROP_FRAME_WIDTH)  #320
-    CAP_HEIGHT = cap.get(cv.CAP_PROP_FRAME_HEIGHT) #240
-
-    cap.set(cv.CAP_PROP_FRAME_WIDTH, CAP_WIDTH/2) 
-    cap.set(cv.CAP_PROP_FRAME_HEIGHT, CAP_HEIGHT/2)
-
-    ###
-    ### RUN WEBCAM AND DIFFUSION
-    ###
-
-    while True:
-        # Read a frame from the webcam
-        ret, image = cap.read()
-
-        # break if cap returns false
-        if not ret:
-            print("Error: Failed to capture frame.")
-            break
-    
-        # Calculate the center position for the black and white filter
-        center_x = (image.shape[1] - WIDTH) // 2
-        center_y = (image.shape[0] - HEIGHT) // 2
-
-        result_image, masked_image = get_result_and_mask(image, center_x, center_y, WIDTH, HEIGHT)
-
-        numpy_image = processor(masked_image)
-        pil_image   = convert_numpy_image_to_pil_image(numpy_image)
-        pil_image   = run_model(pipeline, pil_image)
-
-        result_image[center_y:center_y+HEIGHT, center_x:center_x+WIDTH] = cv.cvtColor(np.array(pil_image), cv.COLOR_RGB2BGR)
-
-        # Display the resulting frame
-        cv.imshow("output", result_image)
-
-        # Break the loop when 'q' key is pressed
-        if cv.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    # Release the webcam and close all windows
-    cap.release()
-    cv.destroyAllWindows()
-
-###
-### RUN SCRIPT
-###
-#@app.on_event("startup")
-#async def startup_event():
-#    print("FastAPI application has started.")
-#    prepare_lcm_controlnet_or_sdxlturbo_pipeline()
+    # Assign processor and run_model based on the model type
+    processor = process_lcm if MODEL == "lcm" else process_sdxlturbo
+    run_model = run_lcm if MODEL == "lcm" else run_sdxlturbo
+    print("Models loaded successfully.")
 
 
 @app.websocket("/ws")
@@ -210,7 +220,7 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_bytes()
 
             # Debugging: Check if any data is received
-            print(f"Received {len(data)} bytes from the client.")
+            #print(f"Received {len(data)} bytes from the client.")
 
             # Convert the received bytes to a numpy array
             nparr = np.frombuffer(data, np.uint8)
@@ -220,17 +230,22 @@ async def websocket_endpoint(websocket: WebSocket):
 
             # Check if the frame is valid
             if frame is None:
-                print("Received an invalid image frame")
+            #    print("Received an invalid image frame")
                 continue
 
-            # Process the frame (e.g., convert to grayscale)
-            gray_frame = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+            # Process the frame (if any preprocessing is needed)
+            numpy_image = processor(frame)
+            pil_image = convert_numpy_image_to_pil_image(numpy_image)
 
-            # Encode the processed frame back to JPEG format
-            _, buffer = cv.imencode('.jpg', gray_frame)
+            # Run Stable Diffusion on the image
+            gen_image = run_model(pipeline, pil_image)
+
+            # Convert the generated image back to a numpy array and encode it as JPEG
+            result_image = np.array(gen_image)
+            _, buffer = cv.imencode('.jpg', cv.cvtColor(result_image, cv.COLOR_RGB2BGR))
 
             # Debugging: Check the size of the processed frame
-            print(f"Sending {len(buffer)} bytes back to the client.")
+            #print(f"Sending {len(buffer)} bytes back to the client.")
 
             # Send the processed frame back to the client
             await websocket.send_bytes(buffer.tobytes())
