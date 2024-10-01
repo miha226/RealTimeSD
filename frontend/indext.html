@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebSocket Video Processing</title>
+  <style>
+    video, canvas {
+      display: block;
+      margin: 0 auto;
+      max-width: 80%;
+    }
+  </style>
+</head>
+<body>
+  <h1 style="text-align:center;">Real-time Video Processing</h1>
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas"></canvas>
+
+  <script>
+    const videoElement = document.getElementById('video');
+    const canvasElement = document.getElementById('canvas');
+    const ctx = canvasElement.getContext('2d');
+
+    // Connect to the WebSocket server
+    const ws = new WebSocket('ws://20.171.148.129:8080/ws/process/');  // Replace with your server URL
+
+    // Check if the WebSocket connection is open
+    ws.onopen = () => {
+      console.log('Connected to WebSocket');
+    };
+
+    // Handle incoming processed image frames from WebSocket
+    ws.onmessage = (event) => {
+      const imageBlob = new Blob([event.data], { type: 'image/jpeg' });
+      const imageURL = URL.createObjectURL(imageBlob);
+
+      const img = new Image();
+      img.onload = () => {
+        ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        ctx.drawImage(img, 0, 0, canvasElement.width, canvasElement.height);
+        URL.revokeObjectURL(imageURL); // Free up memory
+      };
+      img.src = imageURL;
+    };
+
+    // Handle WebSocket connection close or errors
+    ws.onclose = () => console.log('WebSocket closed');
+    ws.onerror = (error) => console.error('WebSocket error', error);
+
+    // Access the user's webcam and stream the video
+    async function initWebcam() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        videoElement.srcObject = stream;
+        videoElement.play();
+      } catch (error) {
+        console.error('Error accessing the webcam', error);
+      }
+    }
+
+    initWebcam();
+
+    // Send video frames to WebSocket for processing at 30 FPS (every 33ms)
+    setInterval(() => {
+      if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
+        canvasElement.width = videoElement.videoWidth;
+        canvasElement.height = videoElement.videoHeight;
+
+        // Draw the current video frame onto the canvas
+        ctx.drawImage(videoElement, 0, 0, canvasElement.width, canvasElement.height);
+
+        // Convert the canvas image to a Blob (binary data) and send it via WebSocket
+        canvasElement.toBlob((blob) => {
+          if (blob && ws.readyState === WebSocket.OPEN) {
+            ws.send(blob);
+          }
+        }, 'image/jpeg');
+      }
+    }, 33);  // 30 FPS is roughly one frame every 33 milliseconds
+  </script>
+</body>
+</html>
