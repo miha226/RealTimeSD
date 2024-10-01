@@ -1,9 +1,12 @@
 // Function to initialize the WebSocket and handle sending/receiving frames
-function initializeWebSocket() {
-    const ws = new WebSocket('ws://127.0.0.1:8000/ws'); // Adjust the WebSocket server URL if needed
+function initializeWebSocket(onOpenCallback) {
+    const ws = new WebSocket('ws://20.172.32.213:8080/ws'); // Adjust the WebSocket server URL if needed
 
     ws.onopen = () => {
         console.log('WebSocket connection opened.');
+        if (typeof onOpenCallback === 'function') {
+            onOpenCallback(ws); // Execute callback when WebSocket is ready
+        }
     };
 
     ws.onclose = () => {
@@ -46,46 +49,33 @@ function sendFramesOverWebSocket(ws, track) {
         console.log("Video dimensions set:", canvas.width, canvas.height);
 
         const captureFrame = () => {
-            if (ws.readyState === WebSocket.OPEN) {
+            if (ws.readyState === WebSocket.OPEN) { // Ensure WebSocket is open
                 context.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
                 console.log('Captured frame from camera and drew on canvas');
 
-                // Check if canvas.toBlob() is supported
-                if (!canvas.toBlob) {
-                    console.error("canvas.toBlob() is not supported, using fallback");
-                    const dataURL = canvas.toDataURL('image/jpeg');
-                    const byteString = atob(dataURL.split(',')[1]);
-                    const arrayBuffer = new Uint8Array(byteString.length);
-                    for (let i = 0; i < byteString.length; i++) {
-                        arrayBuffer[i] = byteString.charCodeAt(i);
+                canvas.toBlob((blob) => {
+                    if (blob) {
+                        console.log("Sending frame to server...");
+                        blob.arrayBuffer().then((buffer) => {
+                            console.log(`Frame size: ${buffer.byteLength} bytes`);
+                            ws.send(buffer); // Send the frame as binary data
+                        });
+                    } else {
+                        console.log("Failed to capture frame as blob");
                     }
-                    ws.send(arrayBuffer.buffer);
-                } else {
-                    // Use canvas.toBlob() if supported
-                    canvas.toBlob((blob) => {
-                        if (blob) {
-                            console.log("Sending frame to server...");
-                            blob.arrayBuffer().then((buffer) => {
-                                console.log(`Frame size: ${buffer.byteLength} bytes`);
-                                ws.send(buffer); // Send the frame as binary data
-                            });
-                        } else {
-                            console.log("Failed to capture frame as blob");
-                        }
-                    }, 'image/jpeg');
-                }
+                }, 'image/jpeg');
 
                 // Capture and send frame every 100ms
                 setTimeout(captureFrame, 100);
+            } else {
+                console.log('WebSocket not open yet, retrying in 100ms');
+                setTimeout(captureFrame, 100); // Retry after 100ms
             }
         };
 
         captureFrame();
     };
 }
-
-
-
 
 // Function to receive processed frames from WebSocket and display them
 function receiveFramesFromWebSocket(ws) {
@@ -116,14 +106,14 @@ function receiveFramesFromWebSocket(ws) {
     };
 }
 
-
 // Main function to initialize the camera stream and WebSocket
 async function startCameraStream() {
-    const ws = initializeWebSocket();
     const videoTrack = await captureCameraStream();
     if (videoTrack) {
-        sendFramesOverWebSocket(ws, videoTrack);
-        receiveFramesFromWebSocket(ws);
+        const ws = initializeWebSocket((ws) => {
+            sendFramesOverWebSocket(ws, videoTrack);
+            receiveFramesFromWebSocket(ws);
+        });
     }
 }
 
