@@ -9,8 +9,8 @@ function initializeWebSocket(onOpenCallback) {
         }
     };
 
-    ws.onclose = () => {
-        console.log('WebSocket connection closed.');
+    ws.onclose = (event) => {
+        console.log('WebSocket connection closed:', event);
     };
 
     ws.onerror = (error) => {
@@ -20,104 +20,156 @@ function initializeWebSocket(onOpenCallback) {
     return ws;
 }
 
-// Function to capture video stream from the user's camera
+// Function to populate the video source selector
+async function populateVideoSources() {
+    try {
+        // Request permission to access media devices
+        await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(device => device.kind === 'videoinput');
+
+        const videoSourceSelect = document.getElementById('videoSource');
+        videoSourceSelect.innerHTML = ''; // Clear any existing entries
+
+        videoDevices.forEach(device => {
+            const option = document.createElement('option');
+            option.value = device.deviceId;
+            option.text = device.label || `Camera ${videoSourceSelect.length + 1}`;
+            videoSourceSelect.appendChild(option);
+        });
+
+        // Listen for changes to the selected camera
+        videoSourceSelect.onchange = () => {
+            // Stop any existing stream
+            if (window.currentStream) {
+                window.currentStream.getTracks().forEach(track => track.stop());
+            }
+            // Restart the camera stream with the new selection
+            startCameraStream();
+        };
+    } catch (error) {
+        console.error('Error enumerating devices:', error);
+    }
+}
+
+// Function to capture video stream from the user's selected camera
 async function captureCameraStream() {
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        const videoSourceSelect = document.getElementById('videoSource');
+        const selectedDeviceId = videoSourceSelect.value;
+
+        const constraints = {
+            video: {
+                width: { ideal: 512 },
+                height: { ideal: 512 },
+                deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined,
+            },
+            audio: false
+        };
+
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
         const localVideo = document.getElementById('localVideo');
+        localVideo.width = 512;
+        localVideo.height = 512;
         localVideo.srcObject = stream;
 
-        const videoTrack = stream.getVideoTracks()[0];
-        return videoTrack;
+        // Store the stream globally to stop it later if needed
+        window.currentStream = stream;
+
+        return stream;
     } catch (error) {
         console.error('Error accessing camera:', error);
     }
 }
 
 // Function to send video frames over WebSocket
-function sendFramesOverWebSocket(ws, track) {
+function sendFramesOverWebSocket(ws, stream) {
+    const videoElement = document.createElement('video');
+    videoElement.srcObject = stream;
+    videoElement.width = 512;
+    videoElement.height = 512;
+    videoElement.muted = true;
+    videoElement.play();
+
     const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 512;
     const context = canvas.getContext('2d');
 
-    const videoElement = document.createElement('video');
-    videoElement.srcObject = new MediaStream([track]);
+    let lastFrameTime = 0;
+    const targetFPS = 30;
+    const frameInterval = 1000 / targetFPS;
 
-    videoElement.onloadedmetadata = () => {
-        videoElement.play();
-        canvas.width = videoElement.videoWidth;
-        canvas.height = videoElement.videoHeight;
-        console.log("Video dimensions set:", canvas.width, canvas.height);
+    const captureFrame = (timestamp) => {
+        if (ws.readyState === WebSocket.OPEN) { // Ensure WebSocket is open
+            const elapsed = timestamp - lastFrameTime;
+            if (elapsed > frameInterval) {
+                lastFrameTime = timestamp;
 
-        const captureFrame = () => {
-            if (ws.readyState === WebSocket.OPEN) { // Ensure WebSocket is open
                 context.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-                console.log('Captured frame from camera and drew on canvas');
 
                 canvas.toBlob((blob) => {
                     if (blob) {
-                        console.log("Sending frame to server...");
                         blob.arrayBuffer().then((buffer) => {
-                            console.log(`Frame size: ${buffer.byteLength} bytes`);
                             ws.send(buffer); // Send the frame as binary data
                         });
                     } else {
                         console.log("Failed to capture frame as blob");
                     }
-                }, 'image/jpeg');
-
-                // Capture and send frame every 100ms
-                setTimeout(captureFrame, 100);
-            } else {
-                console.log('WebSocket not open yet, retrying in 100ms');
-                setTimeout(captureFrame, 100); // Retry after 100ms
+                }, 'image/jpeg', 0.7); // Adjust the quality parameter as needed
             }
-        };
+        } else {
+            console.log('WebSocket not open, cannot send frame.');
+        }
 
-        captureFrame();
+        requestAnimationFrame(captureFrame);
+    };
+
+    videoElement.oncanplay = () => {
+        requestAnimationFrame(captureFrame);
     };
 }
 
 // Function to receive processed frames from WebSocket and display them
 function receiveFramesFromWebSocket(ws) {
-    const remoteVideo = document.getElementById('remoteVideo');
+    const remoteCanvas = document.getElementById('remoteVideo');
+    const context = remoteCanvas.getContext('2d');
 
     ws.onmessage = (event) => {
-        console.log("Received processed frame from server");
-
-        // Create a blob from the binary data received
+        console.log("received frame");
         const blob = new Blob([event.data], { type: 'image/jpeg' });
-        const imageUrl = URL.createObjectURL(blob);
-
-        // Create an image element to display the received frame
         const img = new Image();
-        img.src = imageUrl;
 
         img.onload = () => {
-            // Clear the previous frame and display the new one
-            remoteVideo.src = '';
-            remoteVideo.srcObject = null;
-            remoteVideo.src = imageUrl;
-            console.log("Updated remote video with new frame");
+            context.drawImage(img, 0, 0, remoteCanvas.width, remoteCanvas.height);
+            URL.revokeObjectURL(img.src); // Clean up the object URL
         };
 
-        img.onerror = (error) => {
-            console.error("Failed to load image:", error);
+        img.onerror = (err) => {
+            console.error('Image load error:', err);
+            URL.revokeObjectURL(img.src);
         };
+
+        img.src = URL.createObjectURL(blob);
     };
 }
 
+
 // Main function to initialize the camera stream and WebSocket
 async function startCameraStream() {
-    const videoTrack = await captureCameraStream();
-    if (videoTrack) {
+    const stream = await captureCameraStream();
+    if (stream) {
         const ws = initializeWebSocket((ws) => {
-            sendFramesOverWebSocket(ws, videoTrack);
+            sendFramesOverWebSocket(ws, stream);
             receiveFramesFromWebSocket(ws);
         });
     }
 }
 
 // Start the camera stream and WebSocket connection when the page loads
-window.onload = () => {
-    startCameraStream();
+window.onload = async () => {
+    await populateVideoSources();
+    await startCameraStream();
 };

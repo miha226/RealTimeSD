@@ -2,19 +2,21 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Camera Stream</title>
 </head>
 <body>
   <h1>WebSocket Camera Stream</h1>
-  
+
+  <!-- Camera selection dropdown -->
+  <label for="videoSource">Select Camera:</label>
+  <select id="videoSource"></select>
+
   <!-- Local video stream -->
-  <video id="localVideo" autoplay playsinline></video>
-  
-  <!-- Received video stream (changed to an img for single frame display) -->
-  <img id="remoteVideo" alt="Remote video stream will appear here" />
+  <video id="localVideo" autoplay playsinline width="512" height="512"></video>
+
+  <!-- Received video stream -->
+  <canvas id="remoteVideo" width="512" height="512"></canvas>
 
   <script src="app.js" type="module"></script>
-
 </body>
 </html>
