@@ -13,7 +13,7 @@ import asyncio
 import threading
 from starlette.websockets import WebSocketState
 from transformers import DPTImageProcessor, DPTForDepthEstimation
-
+from DeepCache import DeepCacheSDHelper
 app = FastAPI()
 
 app.add_middleware(
@@ -40,10 +40,10 @@ SDXLTURBO_MODEL_LOCATION = 'models/sdxl-turbo'
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 VARIANT = "fp16"
 TORCH_DTYPE = torch.float16
-GUIDANCE_SCALE = 3  # Higher guidance scale for better prompt adherence
+GUIDANCE_SCALE = 0  # Higher guidance scale for better prompt adherence
 INFERENCE_STEPS = 2  # 4 for lcm (high quality), 2 for turbo
-DEFAULT_NOISE_STRENGTH = 0.7  # 0.5 or 0.7 works well too
-CONDITIONING_SCALE = 0.7  # 0.5 or 0.7 works well too
+DEFAULT_NOISE_STRENGTH = 0.5  # 0.5 or 0.7 works well too
+CONDITIONING_SCALE = 0.5  # 0.5 or 0.7 works well too
 GUIDANCE_START = 0.0
 GUIDANCE_END = 1.0
 RANDOM_SEED = 21
@@ -128,6 +128,11 @@ def prepare_sdxlturbo_pipeline():
             use_safetensors=True,
             torch_dtype=TORCH_DTYPE,
         ).to(TORCH_DEVICE)
+
+        helper = DeepCacheSDHelper(pipe=pipe)
+        helper.set_params(cache_interval=3, cache_branch_id=0)
+        helper.enable()
+
         print("Pipeline loaded and moved to device.")
         return pipe
     except Exception as e:
@@ -139,7 +144,7 @@ def run_sdxlturbo(pipeline, source_image, control_image, generator):
         gen_image = pipeline(
             prompt=DEFAULT_PROMPT,
             num_inference_steps=INFERENCE_STEPS,
-            guidance_scale=GUIDANCE_SCALE,  # Higher guidance scale for better prompt adherence
+            guidance_scale=0,  # Higher guidance scale for better prompt adherence
             width=WIDTH,
             height=HEIGHT,
             generator=generator,
@@ -184,7 +189,7 @@ async def startup_event():
     print("Models loaded successfully.")
 
 # Set a concurrency limit
-MAX_CONCURRENT_PROCESSES = 2  # Adjust based on your GPU capacity
+MAX_CONCURRENT_PROCESSES = 4  # Adjust based on your GPU capacity
 processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PROCESSES)
 
 @app.websocket("/ws")
