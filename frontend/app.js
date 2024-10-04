@@ -99,8 +99,9 @@ function sendFramesOverWebSocket(ws, stream) {
     const context = canvas.getContext('2d');
 
     let lastFrameTime = 0;
-    const targetFPS = 30;
+    const targetFPS = 3;
     const frameInterval = 1000 / targetFPS;
+
 
     const captureFrame = (timestamp) => {
         if (ws.readyState === WebSocket.OPEN) { // Ensure WebSocket is open
