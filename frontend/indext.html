@@ -2,20 +2,99 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Camera Stream</title>
+  <title>Camera Stream with Settings</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
+    .settings-container {
+      margin-bottom: 20px;
+      padding: 15px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+    }
+    .settings-container h2 {
+      margin-top: 0;
+    }
+    .settings-container label {
+      display: block;
+      margin-top: 10px;
+    }
+    .settings-container input, .settings-container textarea {
+      width: 100%;
+      padding: 8px;
+      margin-top: 5px;
+      box-sizing: border-box;
+    }
+    .settings-container button {
+      margin-top: 15px;
+      padding: 10px 15px;
+      background-color: #28a745;
+      color: white;
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .settings-container button:hover {
+      background-color: #218838;
+    }
+    .status-message {
+      margin-top: 10px;
+      font-weight: bold;
+    }
+    .video-container {
+      display: flex;
+      gap: 20px;
+    }
+    .video-container video, .video-container canvas {
+      border: 1px solid #ccc;
+      border-radius: 5px;
+    }
+  </style>
 </head>
 <body>
-  <h1>WebSocket Camera Stream</h1>
+  <h1>WebSocket Camera Stream with Custom Settings</h1>
+
+  <!-- Settings Form -->
+  <div class="settings-container">
+    <h2>Update Generation Settings</h2>
+    <form id="settingsForm">
+      <label for="prompt">Prompt:</label>
+      <textarea id="prompt" name="prompt" rows="3" placeholder="Enter your prompt here...">photo of city glass skyscrapers, 4K, realistic, smooth transition</textarea>
+
+      <label for="seed">Seed:</label>
+      <input type="number" id="seed" name="seed" placeholder="Enter seed (integer)" value="21">
+
+      <label for="inference_steps">Inference Steps:</label>
+      <input type="number" id="inference_steps" name="inference_steps" placeholder="Enter number of inference steps" value="2" min="2">
+
+      <label for="noise_strength">Noise Strength:</label>
+      <input type="number" step="0.1" id="noise_strength" name="noise_strength" placeholder="Enter noise strength (0.5 - 1.0)" value="0.5" min="0.5" max="1">
+
+      <label for="conditioning_scale">Conditioning Scale:</label>
+      <input type="number" step="0.1" id="conditioning_scale" name="conditioning_scale" placeholder="Enter conditioning scale (0.0 - 1.0)" value="0.5" min="0" max="1">
+
+      <label for="target_fps">Target FPS:</label>
+      <input type="number" id="target_fps" name="target_fps" placeholder="Enter target FPS (e.g., 6)" value="6" min="1">
+
+      <button type="submit">Update Settings</button>
+    </form>
+    <div class="status-message" id="statusMessage"></div>
+  </div>
 
   <!-- Camera selection dropdown -->
   <label for="videoSource">Select Camera:</label>
   <select id="videoSource"></select>
 
-  <!-- Local video stream -->
-  <video id="localVideo" autoplay playsinline width="512" height="512"></video>
+  <!-- Video Streams -->
+  <div class="video-container">
+    <!-- Local video stream -->
+    <video id="localVideo" autoplay playsinline width="512" height="512"></video>
 
-  <!-- Received video stream -->
-  <canvas id="remoteVideo" width="512" height="512"></canvas>
+    <!-- Received video stream -->
+    <canvas id="remoteVideo" width="512" height="512"></canvas>
+  </div>
 
   <script src="app.js" type="module"></script>
 </body>

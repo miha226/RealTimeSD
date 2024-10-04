@@ -7,13 +7,16 @@ from diffusers import (
     AutoencoderKL
 )
 import torch
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import threading
 from starlette.websockets import WebSocketState
 from transformers import DPTImageProcessor, DPTForDepthEstimation
 from DeepCache import DeepCacheSDHelper
+from pydantic import BaseModel
+from typing import Optional
+
 app = FastAPI()
 
 app.add_middleware(
@@ -50,13 +53,22 @@ RANDOM_SEED = 21
 HEIGHT = 512
 WIDTH = 512
 
-# Create a threading lock for the pipeline
+# Create threading locks for the pipeline and settings
 pipeline_lock = threading.Lock()
+settings_lock = threading.Lock()
 
-def prepare_seed():
+# Define the settings Pydantic model
+class Settings(BaseModel):
+    prompt: Optional[str] = None
+    seed: Optional[int] = None
+    inference_steps: Optional[int] = None
+    noise_strength: Optional[float] = None
+    conditioning_scale: Optional[float] = None
+
+def prepare_seed(seed: int):
     generator = torch.Generator(device=TORCH_DEVICE)
-    generator.manual_seed(RANDOM_SEED)
-    print("Random seed prepared.")
+    generator.manual_seed(seed)
+    print(f"Random seed prepared: {seed}")
     return generator
 
 def convert_numpy_image_to_pil_image(image):
@@ -139,19 +151,19 @@ def prepare_sdxlturbo_pipeline():
         print(f"Error loading pipeline: {e}")
         return None
 
-def run_sdxlturbo(pipeline, source_image, control_image, generator):
+def run_sdxlturbo(pipeline, source_image, control_image, generator, prompt, num_inference_steps, strength, conditioning_scale):
     try:
         gen_image = pipeline(
-            prompt=DEFAULT_PROMPT,
-            num_inference_steps=INFERENCE_STEPS,
-            guidance_scale=0,  # Higher guidance scale for better prompt adherence
+            prompt=prompt,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=GUIDANCE_SCALE,  # Keeping it as default
             width=WIDTH,
             height=HEIGHT,
             generator=generator,
             image=source_image,                # Source image
             control_image=control_image,        # Control image (depth map)
-            strength=DEFAULT_NOISE_STRENGTH,
-            controlnet_conditioning_scale=CONDITIONING_SCALE,
+            strength=strength,
+            controlnet_conditioning_scale=conditioning_scale,
         ).images[0]
         print("Pipeline successfully generated image.")
         return gen_image
@@ -244,6 +256,14 @@ async def process_and_send_frame(data, websocket):
 
 def process_frame(data):
     try:
+        # Read current settings
+        with settings_lock:
+            prompt = DEFAULT_PROMPT
+            seed = RANDOM_SEED
+            inference_steps = INFERENCE_STEPS
+            noise_strength = DEFAULT_NOISE_STRENGTH
+            conditioning_scale = CONDITIONING_SCALE
+
         # Convert the received bytes to a numpy array
         nparr = np.frombuffer(data, np.uint8)
         print("Converted received data to numpy array.")
@@ -273,12 +293,20 @@ def process_frame(data):
             print("Depth map generated successfully.")
 
         # Prepare a per-thread random number generator
-        generator = prepare_seed()
-        print("Random seed prepared.")
+        generator = prepare_seed(seed)
 
         # Run Stable Diffusion on the image with thread safety
         with pipeline_lock:
-            gen_image = run_model(pipeline, pil_source_image, control_image, generator)
+            gen_image = run_model(
+                pipeline,
+                pil_source_image,
+                control_image,
+                generator,
+                prompt=prompt,
+                num_inference_steps=inference_steps,
+                strength=noise_strength,
+                conditioning_scale=conditioning_scale,
+            )
             if gen_image is None:
                 print("Generated image is None.")
                 return None
@@ -295,3 +323,39 @@ def process_frame(data):
     except Exception as e:
         print(f"Error in process_frame: {e}")
         return None
+
+#################
+################# NEW ADDITIONS
+#################
+
+# POST endpoint to update settings
+@app.post("/settings")
+def update_settings(settings: Settings):
+    """
+    Update the generation settings. Clients can send any combination of the following:
+    - prompt (str)
+    - seed (int)
+    - inference_steps (int)
+    - noise_strength (float)
+    - conditioning_scale (float)
+    
+    If a setting is not provided, the default value remains unchanged.
+    """
+    global DEFAULT_PROMPT, RANDOM_SEED, INFERENCE_STEPS, DEFAULT_NOISE_STRENGTH, CONDITIONING_SCALE
+    with settings_lock:
+        if settings.prompt is not None:
+            DEFAULT_PROMPT = settings.prompt
+            print(f"Updated prompt to: {DEFAULT_PROMPT}")
+        if settings.seed is not None:
+            RANDOM_SEED = settings.seed
+            print(f"Updated seed to: {RANDOM_SEED}")
+        if settings.inference_steps is not None:
+            INFERENCE_STEPS = settings.inference_steps
+            print(f"Updated inference steps to: {INFERENCE_STEPS}")
+        if settings.noise_strength is not None:
+            DEFAULT_NOISE_STRENGTH = settings.noise_strength
+            print(f"Updated noise strength to: {DEFAULT_NOISE_STRENGTH}")
+        if settings.conditioning_scale is not None:
+            CONDITIONING_SCALE = settings.conditioning_scale
+            print(f"Updated conditioning scale to: {CONDITIONING_SCALE}")
+    return {"status": "Settings updated successfully."}

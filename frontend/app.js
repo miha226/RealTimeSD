@@ -1,3 +1,6 @@
+// Attach currentTargetFPS to the window object for global access
+window.currentTargetFPS = 6; // Default FPS
+
 // Function to initialize the WebSocket and handle sending/receiving frames
 function initializeWebSocket(onOpenCallback) {
     const ws = new WebSocket('ws://20.172.32.213:8080/ws'); // Adjust the WebSocket server URL if needed
@@ -99,14 +102,14 @@ function sendFramesOverWebSocket(ws, stream) {
     const context = canvas.getContext('2d');
 
     let lastFrameTime = 0;
-    const targetFPS = 3;
-    const frameInterval = 1000 / targetFPS;
-
 
     const captureFrame = (timestamp) => {
+        const currentFrameInterval = 1000 / window.currentTargetFPS;
+        console.log(`Current FPS: ${window.currentTargetFPS}, Frame Interval: ${currentFrameInterval.toFixed(2)} ms`);
+
         if (ws.readyState === WebSocket.OPEN) { // Ensure WebSocket is open
             const elapsed = timestamp - lastFrameTime;
-            if (elapsed > frameInterval) {
+            if (elapsed > currentFrameInterval) {
                 lastFrameTime = timestamp;
 
                 context.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
@@ -139,7 +142,7 @@ function receiveFramesFromWebSocket(ws) {
     const context = remoteCanvas.getContext('2d');
 
     ws.onmessage = (event) => {
-        console.log("received frame");
+        console.log("Received frame");
         const blob = new Blob([event.data], { type: 'image/jpeg' });
         const img = new Image();
 
@@ -157,6 +160,119 @@ function receiveFramesFromWebSocket(ws) {
     };
 }
 
+// Function to send settings to the backend
+async function sendSettings(settings) {
+    const statusMessage = document.getElementById('statusMessage');
+    try {
+        const response = await fetch('http://20.172.32.213:8080/settings', { // Adjust the URL if needed
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(settings)
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            console.log('Settings updated:', data);
+            statusMessage.textContent = 'Settings updated successfully.';
+            statusMessage.style.color = 'green';
+        } else {
+            const errorData = await response.json();
+            console.error('Failed to update settings:', errorData);
+            statusMessage.textContent = 'Failed to update settings.';
+            statusMessage.style.color = 'red';
+        }
+    } catch (error) {
+        console.error('Error sending settings:', error);
+        statusMessage.textContent = 'Error sending settings.';
+        statusMessage.style.color = 'red';
+    }
+
+    // Clear the status message after 5 seconds
+    setTimeout(() => {
+        statusMessage.textContent = '';
+    }, 5000);
+}
+
+// Function to handle settings form submission
+function handleSettingsForm() {
+    const settingsForm = document.getElementById('settingsForm');
+
+    settingsForm.addEventListener('submit', (event) => {
+        event.preventDefault(); // Prevent the default form submission
+
+        // Gather the form data
+        const prompt = document.getElementById('prompt').value.trim();
+        const seedValue = document.getElementById('seed').value.trim();
+        const inferenceStepsValue = document.getElementById('inference_steps').value.trim();
+        const noiseStrengthValue = document.getElementById('noise_strength').value.trim();
+        const conditioningScaleValue = document.getElementById('conditioning_scale').value.trim();
+        const targetFPSValue = document.getElementById('target_fps').value.trim();
+
+        // Prepare the settings object, only include fields that have been modified
+        const settings = {};
+
+        if (prompt !== "") {
+            settings.prompt = prompt;
+        }
+
+        if (seedValue !== "") {
+            const seed = parseInt(seedValue, 10);
+            if (!isNaN(seed)) {
+                settings.seed = seed;
+            } else {
+                alert('Seed must be an integer.');
+                return;
+            }
+        }
+
+        if (inferenceStepsValue !== "") {
+            const inference_steps = parseInt(inferenceStepsValue, 10);
+            if (!isNaN(inference_steps) && inference_steps >= 2) { // Ensure inference_steps >= 2
+                settings.inference_steps = inference_steps;
+            } else {
+                alert('Inference Steps must be an integer greater than or equal to 2.');
+                return;
+            }
+        }
+
+        if (noiseStrengthValue !== "") {
+            const noise_strength = parseFloat(noiseStrengthValue);
+            if (!isNaN(noise_strength) && noise_strength >= 0.5 && noise_strength <= 1) { // Ensure 0.5 <= noise_strength <= 1
+                settings.noise_strength = noise_strength;
+            } else {
+                alert('Noise Strength must be a number between 0.5 and 1.0.');
+                return;
+            }
+        }
+
+        if (conditioningScaleValue !== "") {
+            const conditioning_scale = parseFloat(conditioningScaleValue);
+            if (!isNaN(conditioning_scale) && conditioning_scale >= 0 && conditioning_scale <= 1) {
+                settings.conditioning_scale = conditioning_scale;
+            } else {
+                alert('Conditioning Scale must be a number between 0.0 and 1.0.');
+                return;
+            }
+        }
+
+        if (targetFPSValue !== "") {
+            const target_fps = parseInt(targetFPSValue, 10);
+            if (!isNaN(target_fps) && target_fps >= 1) {
+                settings.target_fps = target_fps;
+                window.currentTargetFPS = target_fps; // Update the global FPS variable
+                console.log(`Target FPS updated to: ${window.currentTargetFPS}`);
+            } else {
+                alert('Target FPS must be an integer greater than or equal to 1.');
+                return;
+            }
+        }
+
+        // Send the settings to the backend
+        sendSettings(settings);
+    });
+}
 
 // Main function to initialize the camera stream and WebSocket
 async function startCameraStream() {
@@ -168,6 +284,9 @@ async function startCameraStream() {
         });
     }
 }
+
+// Initialize the settings form handler
+handleSettingsForm();
 
 // Start the camera stream and WebSocket connection when the page loads
 window.onload = async () => {
