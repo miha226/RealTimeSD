@@ -19,6 +19,7 @@ from typing import Optional, List
 import time
 import random
 import uuid
+import concurrent.futures  # Added for ThreadPoolExecutor
 
 # Uncomment the following lines if you decide to use the 'sfast' compiler
 from sfast.compilers.diffusion_pipeline_compiler import (compile, CompilationConfig)
@@ -77,7 +78,15 @@ WIDTH = 512
 BATCH_INTERVAL = 0.5  # seconds
 MAX_BATCH_SIZE = 2    # Changed initial value from 12 to 2
 
+# Define the number of worker threads
+NUM_WORKERS = 4  # Adjust based on your GPU's capability
+
+# Initialize the ThreadPoolExecutor
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=NUM_WORKERS)
+
 # Create threading locks for the pipeline and settings
+# Removed pipeline_lock if assuming thread-safe or managing multiple pipelines
+# If not thread-safe, retain the lock
 pipeline_lock = threading.Lock()
 settings_lock = threading.Lock()
 
@@ -186,7 +195,7 @@ def prepare_sdxlturbo_pipeline():
     # #########################
 
     # Uncomment the following lines if you decide to use the 'sfast' compiler
-   
+
     config = CompilationConfig.Default()
 
     # Attempt to enable xformers
@@ -216,7 +225,7 @@ def prepare_sdxlturbo_pipeline():
     config.enable_cnn_optimization = True
     config.preserve_parameters = False
     config.prefer_lowp_gemm = True
-   
+
     # #########################
     # 6. Compiling the Pipeline (Optional)
     # #########################
@@ -228,7 +237,6 @@ def prepare_sdxlturbo_pipeline():
         print("Compiler module 'sfast' not found. Skipping pipeline compilation.")
     except Exception as e:
         print(f"Error during pipeline compilation: {e}")
-    
 
     # If not using compiler, assign the pipeline directly
     pipeline = pipe
@@ -269,21 +277,21 @@ def run_sdxlturbo_batch(
         print(f"Conditioning scale: {conditioning_scale}")
 
         # Run the pipeline with scalar inputs for strength and guidance_scale
-        with pipeline_lock:
-            gen_images = pipeline(
-                prompt=prompts,  # List[str]
-                num_inference_steps=num_inference_steps,  # int
-                guidance_scale=guidance_scale,  # Scalar float
-                width=WIDTH,  # int
-                height=HEIGHT,  # int
-                generator=generator,  # Single torch.Generator
-                image=source_images,  # List[Image.Image]
-                control_image=control_images,  # List[Image.Image]
-                strength=strength,  # Scalar float
-                controlnet_conditioning_scale=conditioning_scale,  # Scalar float
-            ).images
-            print(f"Pipeline successfully generated {len(gen_images)} images.")
-            return gen_images
+        # Removed pipeline_lock assuming thread safety or using multiple pipelines
+        gen_images = pipeline(
+            prompt=prompts,  # List[str]
+            num_inference_steps=num_inference_steps,  # int
+            guidance_scale=guidance_scale,  # Scalar float
+            width=WIDTH,  # int
+            height=HEIGHT,  # int
+            generator=generator,  # Single torch.Generator
+            image=source_images,  # List[Image.Image]
+            control_image=control_images,  # List[Image.Image]
+            strength=strength,  # Scalar float
+            controlnet_conditioning_scale=conditioning_scale,  # Scalar float
+        ).images
+        print(f"Pipeline successfully generated {len(gen_images)} images.")
+        return gen_images
     except Exception as e:
         import traceback
         print(f"Error during pipeline execution: {e}")
@@ -326,6 +334,11 @@ async def startup_event():
     # Start the background batch processor
     asyncio.create_task(batch_processor())
     print("Background batch processor started.")
+
+@app.on_event("shutdown")
+def shutdown_event():
+    executor.shutdown(wait=True)
+    print("ThreadPoolExecutor has been shut down.")
 
 # #########################
 # 8. Settings Endpoint
@@ -436,7 +449,9 @@ async def process_batch(batch: List[ImageRequest]):
 
     # Extract data from the batch
     for request in batch:
-        pil_source_image = convert_numpy_image_to_pil_image(cv.imdecode(np.frombuffer(request.data, np.uint8), cv.IMREAD_COLOR))
+        pil_source_image = convert_numpy_image_to_pil_image(
+            cv.imdecode(np.frombuffer(request.data, np.uint8), cv.IMREAD_COLOR)
+        )
         if pil_source_image is None:
             print(f"Failed to convert image for request {request.request_id}. Skipping.")
             continue
@@ -470,17 +485,29 @@ async def process_batch(batch: List[ImageRequest]):
         print("No valid images to process in this batch.")
         return
 
-    # Run the pipeline in batch
-    gen_images = run_model(
-        pipeline,
-        source_images,
-        control_images,
-        generators,
-        prompts,
-        INFERENCE_STEPS,
-        strengths,
-        conditioning_scales
-    )
+    # Define a synchronous function to run the model
+    def run_model_sync():
+        return run_model(
+            pipeline,
+            source_images,
+            control_images,
+            generators,
+            prompts,
+            INFERENCE_STEPS,
+            strengths,
+            conditioning_scales
+        )
+
+    try:
+        # Submit the batch processing to the thread pool
+        future = executor.submit(run_model_sync)
+        gen_images = future.result()
+        print(f"Batch processed with {len(gen_images)} images.")
+    except Exception as e:
+        import traceback
+        print(f"Error during pipeline execution: {e}")
+        print(traceback.format_exc())  # Print full traceback for debugging
+        gen_images = [None] * len(source_images)
 
     # Iterate over generated images and send back to respective clients
     for idx, gen_image in enumerate(gen_images):
