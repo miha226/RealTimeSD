@@ -105,7 +105,7 @@ function sendFramesOverWebSocket(ws, stream) {
 
     const captureFrame = (timestamp) => {
         const currentFrameInterval = 1000 / window.currentTargetFPS;
-        console.log(`Current FPS: ${window.currentTargetFPS}, Frame Interval: ${currentFrameInterval.toFixed(2)} ms`);
+        // console.log(`Current FPS: ${window.currentTargetFPS}, Frame Interval: ${currentFrameInterval.toFixed(2)} ms`);
 
         if (ws.readyState === WebSocket.OPEN) { // Ensure WebSocket is open
             const elapsed = timestamp - lastFrameTime;
@@ -125,7 +125,7 @@ function sendFramesOverWebSocket(ws, stream) {
                 }, 'image/jpeg', 0.7); // Adjust the quality parameter as needed
             }
         } else {
-            console.log('WebSocket not open, cannot send frame.');
+            // console.log('WebSocket not open, cannot send frame.');
         }
 
         requestAnimationFrame(captureFrame);
@@ -142,9 +142,10 @@ function receiveFramesFromWebSocket(ws) {
     const context = remoteCanvas.getContext('2d');
 
     ws.onmessage = (event) => {
-        console.log("Received frame");
+        // console.log("Received frame");
         const blob = new Blob([event.data], { type: 'image/jpeg' });
         const img = new Image();
+        console.log(`Received frame at ${Date.now() / 1000} seconds and ${Date.now()} milliseconds.`);
 
         img.onload = () => {
             context.drawImage(img, 0, 0, remoteCanvas.width, remoteCanvas.height);
@@ -208,6 +209,8 @@ function handleSettingsForm() {
         const inferenceStepsValue = document.getElementById('inference_steps').value.trim();
         const noiseStrengthValue = document.getElementById('noise_strength').value.trim();
         const conditioningScaleValue = document.getElementById('conditioning_scale').value.trim();
+        const batchIntervalValue = document.getElementById('batch_interval').value.trim();
+        const maxBatchSizeValue = document.getElementById('max_batch_size').value.trim();
         const targetFPSValue = document.getElementById('target_fps').value.trim();
 
         // Prepare the settings object, only include fields that have been modified
@@ -253,6 +256,26 @@ function handleSettingsForm() {
                 settings.conditioning_scale = conditioning_scale;
             } else {
                 alert('Conditioning Scale must be a number between 0.0 and 1.0.');
+                return;
+            }
+        }
+
+        if (batchIntervalValue !== "") {
+            const batch_interval = parseFloat(batchIntervalValue);
+            if (!isNaN(batch_interval) && batch_interval >= 0.1) { // Ensure batch_interval >= 0.1 seconds
+                settings.batch_interval = batch_interval;
+            } else {
+                alert('Batch Interval must be a number greater than or equal to 0.1 seconds.');
+                return;
+            }
+        }
+
+        if (maxBatchSizeValue !== "") {
+            const max_batch_size = parseInt(maxBatchSizeValue, 10);
+            if (!isNaN(max_batch_size) && max_batch_size >= 1 && max_batch_size <= 10) { // Ensure 1 <= max_batch_size <= 10
+                settings.max_batch_size = max_batch_size;
+            } else {
+                alert('Max Batch Size must be an integer between 1 and 10.');
                 return;
             }
         }
