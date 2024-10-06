@@ -4,10 +4,10 @@ from PIL import Image
 from diffusers import (
     StableDiffusionXLControlNetImg2ImgPipeline,
     ControlNetModel,
-    AutoencoderKL
+    AutoencoderTiny
 )
 import torch
-from fastapi import FastAPI, WebSocket, HTTPException
+from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import threading
@@ -16,6 +16,7 @@ from transformers import DPTImageProcessor, DPTForDepthEstimation
 from DeepCache import DeepCacheSDHelper
 from pydantic import BaseModel
 from typing import Optional
+from sfast.compilers.diffusion_pipeline_compiler import (compile, CompilationConfig)
 
 app = FastAPI()
 
@@ -125,7 +126,11 @@ def prepare_sdxlturbo_pipeline():
         return None
 
     try:
-        vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
+        vae = AutoencoderTiny.from_pretrained(
+            'madebyollin/taesdxl',
+            use_safetensors=True,
+            torch_dtype=torch.float16,
+        ).to(TORCH_DEVICE)
         print("VAE model loaded.")
     except Exception as e:
         print(f"Error loading VAE model: {e}")
@@ -141,15 +146,66 @@ def prepare_sdxlturbo_pipeline():
             torch_dtype=TORCH_DTYPE,
         ).to(TORCH_DEVICE)
 
-        helper = DeepCacheSDHelper(pipe=pipe)
-        helper.set_params(cache_interval=3, cache_branch_id=0)
-        helper.enable()
+        #helper = DeepCacheSDHelper(pipe=pipe)
+        #helper.set_params(cache_interval=3, cache_branch_id=0)
+        #helper.enable()
 
         print("Pipeline loaded and moved to device.")
-        return pipe
     except Exception as e:
         print(f"Error loading pipeline: {e}")
         return None
+
+    # #########################
+    # 5. Enabling xformers and Triton (Optional)
+    # #########################
+
+    # Uncomment the following lines if you decide to use the 'sfast' compiler
+
+    config = CompilationConfig.Default()
+
+    # Attempt to enable xformers
+    try:
+        import xformers
+        config.enable_xformers = True
+        print("xformers enabled for pipeline.")
+    except ImportError:
+        print('xformers not installed, skipping xformers optimization.')
+
+    # Attempt to enable triton
+    try:
+        import triton
+        config.enable_triton = True
+        print("Triton enabled for pipeline.")
+    except ImportError:
+        print('Triton not installed, skipping Triton optimization.')
+
+    # Enable CUDA Graphs
+    config.enable_cuda_graph = True
+    print("CUDA Graphs enabled for pipeline.")
+
+    # Additional compiler settings similar to maxperf.py
+    config.enable_jit = True
+    config.enable_jit_freeze = True
+    config.trace_scheduler = True
+    config.enable_cnn_optimization = True
+    config.preserve_parameters = False
+    config.prefer_lowp_gemm = True
+
+    # #########################
+    # 6. Compiling the Pipeline (Optional)
+    # #########################
+
+    try:
+        pipe = compile(pipe, config)
+        print("Pipeline compiled with optimizations.")
+    except ImportError:
+        print("Compiler module 'sfast' not found. Skipping pipeline compilation.")
+    except Exception as e:
+        print(f"Error during pipeline compilation: {e}")
+
+    # If not using compiler, assign the pipeline directly
+    pipeline = pipe
+    return pipeline
 
 def run_sdxlturbo(pipeline, source_image, control_image, generator, prompt, num_inference_steps, strength, conditioning_scale):
     try:
