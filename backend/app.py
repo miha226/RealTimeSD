@@ -2,21 +2,21 @@ import cv2 as cv
 import numpy as np
 from PIL import Image
 from diffusers import (
-    StableDiffusionXLControlNetImg2ImgPipeline,
-    ControlNetModel,
+    StableDiffusionXLAdapterPipeline,
+    T2IAdapter,
+    EulerAncestralDiscreteScheduler,
     AutoencoderTiny
 )
+from controlnet_aux import MidasDetector  # Changed depth estimator
 import torch
 from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import threading
 from starlette.websockets import WebSocketState
-from transformers import DPTImageProcessor, DPTForDepthEstimation
 from DeepCache import DeepCacheSDHelper
 from pydantic import BaseModel
 from typing import Optional
-from sfast.compilers.diffusion_pipeline_compiler import (compile, CompilationConfig)
 
 app = FastAPI()
 
@@ -39,17 +39,16 @@ feature_extractor = None
 run_model = None
 
 DEFAULT_PROMPT = "photo of city glass skyscrapers, 4K, realistic, smooth transition"
+NEGATIVE_PROMPT = "anime, cartoon, graphic, text, painting, crayon, graphite, abstract, glitch, deformed, mutated, ugly, disfigured"  # Added negative prompt
 MODEL = "sdxlturbo"  # "lcm" or "sdxlturbo"
-SDXLTURBO_MODEL_LOCATION = 'models/sdxl-turbo'
+SDXLTURBO_MODEL_LOCATION = 'stabilityai/stable-diffusion-xl-base-1.0'  # Updated to model ID used in T2I Adapter
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 VARIANT = "fp16"
 TORCH_DTYPE = torch.float16
-GUIDANCE_SCALE = 0  # Higher guidance scale for better prompt adherence
-INFERENCE_STEPS = 2  # 4 for lcm (high quality), 2 for turbo
+GUIDANCE_SCALE = 0  # Increased guidance scale for better adherence
+INFERENCE_STEPS = 2  # Increased inference steps from 2 to 30
 DEFAULT_NOISE_STRENGTH = 0.5  # 0.5 or 0.7 works well too
-CONDITIONING_SCALE = 0.5  # 0.5 or 0.7 works well too
-GUIDANCE_START = 0.0
-GUIDANCE_END = 1.0
+CONDITIONING_SCALE = 1.0  # Updated conditioning scale based on example
 RANDOM_SEED = 21
 HEIGHT = 512
 WIDTH = 512
@@ -61,6 +60,7 @@ settings_lock = threading.Lock()
 # Define the settings Pydantic model
 class Settings(BaseModel):
     prompt: Optional[str] = None
+    negative_prompt: Optional[str] = None  # Added negative prompt
     seed: Optional[int] = None
     inference_steps: Optional[int] = None
     noise_strength: Optional[float] = None
@@ -84,48 +84,37 @@ def convert_numpy_image_to_pil_image(image):
 def get_depth_map(image):
     try:
         # Preprocess the image for depth estimation
-        inputs = feature_extractor(images=image, return_tensors="pt").pixel_values.to(TORCH_DEVICE)
-        with torch.no_grad():
-            with torch.autocast("cuda"):
-                depth = depth_estimator(inputs).predicted_depth
-
-        # Resize depth map to match desired size
-        depth = torch.nn.functional.interpolate(
-            depth.unsqueeze(1),
-            size=(HEIGHT, WIDTH),
-            mode="bicubic",
-            align_corners=False,
-        )
-        # Normalize the depth map
-        depth_min = torch.amin(depth, dim=[1, 2, 3], keepdim=True)
-        depth_max = torch.amax(depth, dim=[1, 2, 3], keepdim=True)
-        depth = (depth - depth_min) / (depth_max - depth_min)
-        # Convert to 3 channels
-        depth = torch.cat([depth] * 3, dim=1)
-        # Convert to PIL Image
-        depth = depth.permute(0, 2, 3, 1).cpu().numpy()[0]
-        depth_image = Image.fromarray((depth * 255.0).clip(0, 255).astype(np.uint8))
+        depth = depth_estimator(image, detect_resolution=512, image_resolution=1024)
         print("Depth map generated successfully.")
-        return depth_image
+        return depth
     except Exception as e:
         print(f"Error generating depth map: {e}")
         return None
 
-def prepare_sdxlturbo_pipeline():
+def prepare_t2i_adapter_pipeline():
     try:
-        # Load the depth ControlNet model
-        controlnet = ControlNetModel.from_pretrained(
-            "diffusers/controlnet-depth-sdxl-1.0-small",
-            variant="fp16",
-            use_safetensors=True,
+        # Load the T2I Adapter
+        adapter = T2IAdapter.from_pretrained(
+            "TencentARC/t2i-adapter-depth-midas-sdxl-1.0",
             torch_dtype=torch.float16,
-        )
-        print("Depth ControlNet model loaded.")
+            variant="fp16"
+        ).to(TORCH_DEVICE)
+        print("T2I Adapter loaded.")
     except Exception as e:
-        print(f"Error loading ControlNet model: {e}")
+        print(f"Error loading T2I Adapter: {e}")
         return None
 
     try:
+        # Load the Euler Ancestral Discrete Scheduler
+        model_id = 'stabilityai/stable-diffusion-xl-base-1.0'
+        euler_a = EulerAncestralDiscreteScheduler.from_pretrained(model_id, subfolder="scheduler")
+        print("Scheduler loaded.")
+    except Exception as e:
+        print(f"Error loading scheduler: {e}")
+        return None
+
+    try:
+        # Load the VAE
         vae = AutoencoderTiny.from_pretrained(
             'madebyollin/taesdxl',
             use_safetensors=True,
@@ -137,89 +126,39 @@ def prepare_sdxlturbo_pipeline():
         return None
 
     try:
-        pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
-            SDXLTURBO_MODEL_LOCATION,
-            controlnet=controlnet,
+        # Initialize the StableDiffusionXLAdapterPipeline
+        pipe = StableDiffusionXLAdapterPipeline.from_pretrained(
+            model_id,
             vae=vae,
-            variant=VARIANT,
-            use_safetensors=True,
+            adapter=adapter,
+            scheduler=euler_a,
             torch_dtype=TORCH_DTYPE,
+            variant="fp16",
+            use_safetensors=True
         ).to(TORCH_DEVICE)
+        pipe.enable_xformers_memory_efficient_attention()
+        print("StableDiffusionXLAdapterPipeline loaded and moved to device.")
 
-        #helper = DeepCacheSDHelper(pipe=pipe)
-        #helper.set_params(cache_interval=3, cache_branch_id=0)
-        #helper.enable()
+        # Initialize DeepCache if needed (optional)
+        # helper = DeepCacheSDHelper(pipe=pipe)
+        # helper.set_params(cache_interval=3, cache_branch_id=0)
+        # helper.enable()
 
-        print("Pipeline loaded and moved to device.")
+        return pipe
     except Exception as e:
         print(f"Error loading pipeline: {e}")
         return None
 
-    # #########################
-    # 5. Enabling xformers and Triton (Optional)
-    # #########################
-
-    # Uncomment the following lines if you decide to use the 'sfast' compiler
-
-    config = CompilationConfig.Default()
-
-    # Attempt to enable xformers
-    try:
-        import xformers
-        config.enable_xformers = True
-        print("xformers enabled for pipeline.")
-    except ImportError:
-        print('xformers not installed, skipping xformers optimization.')
-
-    # Attempt to enable triton
-    try:
-        import triton
-        config.enable_triton = True
-        print("Triton enabled for pipeline.")
-    except ImportError:
-        print('Triton not installed, skipping Triton optimization.')
-
-    # Enable CUDA Graphs
-    config.enable_cuda_graph = True
-    print("CUDA Graphs enabled for pipeline.")
-
-    # Additional compiler settings similar to maxperf.py
-    config.enable_jit = True
-    config.enable_jit_freeze = True
-    config.trace_scheduler = True
-    config.enable_cnn_optimization = True
-    config.preserve_parameters = False
-    config.prefer_lowp_gemm = True
-
-    # #########################
-    # 6. Compiling the Pipeline (Optional)
-    # #########################
-
-    try:
-        pipe = compile(pipe, config)
-        print("Pipeline compiled with optimizations.")
-    except ImportError:
-        print("Compiler module 'sfast' not found. Skipping pipeline compilation.")
-    except Exception as e:
-        print(f"Error during pipeline compilation: {e}")
-
-    # If not using compiler, assign the pipeline directly
-    pipeline = pipe
-    return pipeline
-
-def run_sdxlturbo(pipeline, source_image, control_image, generator, prompt, num_inference_steps, strength, conditioning_scale):
+def run_t2i_adapter(pipeline, source_image, control_image, generator, prompt, negative_prompt, num_inference_steps, conditioning_scale):
     try:
         gen_image = pipeline(
             prompt=prompt,
+            negative_prompt=negative_prompt,
+            image=source_image,  # Pass the source image here
             num_inference_steps=num_inference_steps,
-            guidance_scale=GUIDANCE_SCALE,  # Keeping it as default
-            width=WIDTH,
-            height=HEIGHT,
-            generator=generator,
-            image=source_image,                # Source image
-            control_image=control_image,        # Control image (depth map)
-            strength=strength,
-            controlnet_conditioning_scale=conditioning_scale,
+            adapter_conditioning_scale=conditioning_scale,  # Utilize the depth map via adapter
+            guidance_scale=GUIDANCE_SCALE,
+            generator=generator
         ).images[0]
         print("Pipeline successfully generated image.")
         return gen_image
@@ -233,16 +172,19 @@ async def startup_event():
 
     print("FastAPI application is starting... Loading models into GPU.")
     try:
-        # Load depth estimator and processor
-        depth_estimator = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas").to(TORCH_DEVICE)
-        feature_extractor = DPTImageProcessor.from_pretrained("Intel/dpt-hybrid-midas")
-        print("Depth estimator and feature extractor loaded.")
+        # Load depth estimator (MidasDetector)
+        depth_estimator = MidasDetector.from_pretrained(
+            "valhalla/t2iadapter-aux-models",
+            filename="dpt_large_384.pt",
+            model_type='dpt_large'
+        ).to(TORCH_DEVICE)
+        print("MidasDetector loaded.")
     except Exception as e:
-        print(f"Error loading depth estimator or feature extractor: {e}")
+        print(f"Error loading MidasDetector: {e}")
         raise e
 
     try:
-        pipeline = prepare_sdxlturbo_pipeline()
+        pipeline = prepare_t2i_adapter_pipeline()
         if pipeline is None:
             print("Failed to load pipeline.")
             raise RuntimeError("Pipeline loading failed.")
@@ -253,11 +195,11 @@ async def startup_event():
         raise e
 
     # Assign run_model based on the model type
-    run_model = run_sdxlturbo
+    run_model = run_t2i_adapter
     print("Models loaded successfully.")
 
 # Set a concurrency limit
-MAX_CONCURRENT_PROCESSES = 8  # Adjust based on your GPU capacity
+MAX_CONCURRENT_PROCESSES = 4  # Adjust based on your GPU capacity
 processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PROCESSES)
 
 @app.websocket("/ws")
@@ -315,6 +257,7 @@ def process_frame(data):
         # Read current settings
         with settings_lock:
             prompt = DEFAULT_PROMPT
+            negative_prompt = NEGATIVE_PROMPT  # Include negative prompt
             seed = RANDOM_SEED
             inference_steps = INFERENCE_STEPS
             noise_strength = DEFAULT_NOISE_STRENGTH
@@ -355,12 +298,12 @@ def process_frame(data):
         with pipeline_lock:
             gen_image = run_model(
                 pipeline,
-                pil_source_image,
-                control_image,
+                pil_source_image,      # Pass the source image here
+                control_image,        # Ensure the adapter uses this control image
                 generator,
                 prompt=prompt,
+                negative_prompt=negative_prompt,
                 num_inference_steps=inference_steps,
-                strength=noise_strength,
                 conditioning_scale=conditioning_scale,
             )
             if gen_image is None:
@@ -390,18 +333,22 @@ def update_settings(settings: Settings):
     """
     Update the generation settings. Clients can send any combination of the following:
     - prompt (str)
+    - negative_prompt (str)
     - seed (int)
     - inference_steps (int)
     - noise_strength (float)
     - conditioning_scale (float)
-    
+
     If a setting is not provided, the default value remains unchanged.
     """
-    global DEFAULT_PROMPT, RANDOM_SEED, INFERENCE_STEPS, DEFAULT_NOISE_STRENGTH, CONDITIONING_SCALE
+    global DEFAULT_PROMPT, NEGATIVE_PROMPT, RANDOM_SEED, INFERENCE_STEPS, DEFAULT_NOISE_STRENGTH, CONDITIONING_SCALE
     with settings_lock:
         if settings.prompt is not None:
             DEFAULT_PROMPT = settings.prompt
             print(f"Updated prompt to: {DEFAULT_PROMPT}")
+        if settings.negative_prompt is not None:
+            NEGATIVE_PROMPT = settings.negative_prompt
+            print(f"Updated negative prompt to: {NEGATIVE_PROMPT}")
         if settings.seed is not None:
             RANDOM_SEED = settings.seed
             print(f"Updated seed to: {RANDOM_SEED}")
