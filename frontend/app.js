@@ -196,6 +196,10 @@ async function sendSettings(settings) {
     }, 5000);
 }
 
+// Function to send FPS settings to the backend (if needed in future)
+// Currently, Target FPS is handled entirely on the client side
+// If backend needs to know about FPS, implement here
+
 // Function to handle settings form submission
 function handleSettingsForm() {
     const settingsForm = document.getElementById('settingsForm');
@@ -209,9 +213,6 @@ function handleSettingsForm() {
         const inferenceStepsValue = document.getElementById('inference_steps').value.trim();
         const noiseStrengthValue = document.getElementById('noise_strength').value.trim();
         const conditioningScaleValue = document.getElementById('conditioning_scale').value.trim();
-        const batchIntervalValue = document.getElementById('batch_interval').value.trim();
-        const maxBatchSizeValue = document.getElementById('max_batch_size').value.trim();
-        const targetFPSValue = document.getElementById('target_fps').value.trim();
 
         // Prepare the settings object, only include fields that have been modified
         const settings = {};
@@ -260,40 +261,42 @@ function handleSettingsForm() {
             }
         }
 
-        if (batchIntervalValue !== "") {
-            const batch_interval = parseFloat(batchIntervalValue);
-            if (!isNaN(batch_interval) && batch_interval >= 0.1) { // Ensure batch_interval >= 0.1 seconds
-                settings.batch_interval = batch_interval;
-            } else {
-                alert('Batch Interval must be a number greater than or equal to 0.1 seconds.');
-                return;
-            }
-        }
+        // Send the settings to the backend
+        sendSettings(settings);
+    });
+}
 
-        if (maxBatchSizeValue !== "") {
-            const max_batch_size = parseInt(maxBatchSizeValue, 10);
-            if (!isNaN(max_batch_size) && max_batch_size >= 1 && max_batch_size <= 10) { // Ensure 1 <= max_batch_size <= 10
-                settings.max_batch_size = max_batch_size;
-            } else {
-                alert('Max Batch Size must be an integer between 1 and 10.');
-                return;
-            }
-        }
+// Function to handle FPS form submission
+function handleFPSForm() {
+    const fpsForm = document.getElementById('fpsForm');
 
+    fpsForm.addEventListener('submit', (event) => {
+        event.preventDefault(); // Prevent the default form submission
+
+        // Gather the form data
+        const targetFPSValue = document.getElementById('target_fps').value.trim();
+
+        // Prepare the FPS settings
         if (targetFPSValue !== "") {
             const target_fps = parseInt(targetFPSValue, 10);
             if (!isNaN(target_fps) && target_fps >= 1) {
-                settings.target_fps = target_fps;
                 window.currentTargetFPS = target_fps; // Update the global FPS variable
                 console.log(`Target FPS updated to: ${window.currentTargetFPS}`);
+
+                // Optionally, display a status message
+                const fpsStatusMessage = document.getElementById('fpsStatusMessage');
+                fpsStatusMessage.textContent = 'Target FPS updated successfully.';
+                fpsStatusMessage.style.color = 'green';
+
+                // Clear the status message after 5 seconds
+                setTimeout(() => {
+                    fpsStatusMessage.textContent = '';
+                }, 5000);
             } else {
                 alert('Target FPS must be an integer greater than or equal to 1.');
                 return;
             }
         }
-
-        // Send the settings to the backend
-        sendSettings(settings);
     });
 }
 
@@ -310,6 +313,9 @@ async function startCameraStream() {
 
 // Initialize the settings form handler
 handleSettingsForm();
+
+// Initialize the FPS form handler
+handleFPSForm();
 
 // Start the camera stream and WebSocket connection when the page loads
 window.onload = async () => {

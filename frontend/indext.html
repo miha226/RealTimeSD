@@ -8,26 +8,27 @@
       font-family: Arial, sans-serif;
       margin: 20px;
     }
-    .settings-container {
+    .settings-container, .fps-container {
       margin-bottom: 20px;
       padding: 15px;
       border: 1px solid #ccc;
       border-radius: 5px;
     }
-    .settings-container h2 {
+    .settings-container h2, .fps-container h2 {
       margin-top: 0;
     }
-    .settings-container label {
+    .settings-container label, .fps-container label {
       display: block;
       margin-top: 10px;
     }
-    .settings-container input, .settings-container textarea {
+    .settings-container input, .settings-container textarea,
+    .fps-container input {
       width: 100%;
       padding: 8px;
       margin-top: 5px;
       box-sizing: border-box;
     }
-    .settings-container button {
+    .settings-container button, .fps-container button {
       margin-top: 15px;
       padding: 10px 15px;
       background-color: #28a745;
@@ -36,10 +37,10 @@
       border-radius: 3px;
       cursor: pointer;
     }
-    .settings-container button:hover {
+    .settings-container button:hover, .fps-container button:hover {
       background-color: #218838;
     }
-    .status-message {
+    .status-message, .fps-status-message {
       margin-top: 10px;
       font-weight: bold;
     }
@@ -75,18 +76,20 @@
       <label for="conditioning_scale">Conditioning Scale:</label>
       <input type="number" step="0.1" id="conditioning_scale" name="conditioning_scale" placeholder="Enter conditioning scale (0.0 - 1.0)" value="0.5" min="0" max="1">
 
-      <!-- New Fields for Batching -->
-      <label for="batch_interval">Batch Interval (seconds):</label>
-      <input type="number" step="0.1" id="batch_interval" name="batch_interval" placeholder="Enter batch interval in seconds (e.g., 0.5)" value="0.5" min="0.1">
-
-      <label for="max_batch_size">Max Batch Size:</label>
-      <input type="number" id="max_batch_size" name="max_batch_size" placeholder="Enter maximum batch size (e.g., 10)" value="2" min="1" max="10">
-      <label for="target_fps">Target FPS:</label>
-      <input type="number" id="target_fps" name="target_fps" placeholder="Enter target FPS (e.g., 6)" value="6" min="1">
-
       <button type="submit">Update Settings</button>
     </form>
     <div class="status-message" id="statusMessage"></div>
+  </div>
+
+  <!-- Target FPS Form -->
+  <div class="fps-container">
+    <h2>Set Target FPS</h2>
+    <form id="fpsForm">
+      <label for="target_fps">Target FPS:</label>
+      <input type="number" id="target_fps" name="target_fps" placeholder="Enter target FPS (e.g., 6)" value="6" min="1">
+      <button type="submit">Update FPS</button>
+    </form>
+    <div class="fps-status-message" id="fpsStatusMessage"></div>
   </div>
 
   <!-- Camera selection dropdown -->
