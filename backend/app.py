@@ -289,28 +289,52 @@ async def websocket_endpoint(websocket: WebSocket):
         print("WebSocket closed.")
 
 async def process_and_send_frame(data, websocket):
+    """
+    Process a single frame and send the result back to the client.
+    Implements a timeout of 200 ms for both acquiring the semaphore and processing the frame.
+    If either step exceeds 200 ms, the frame is dropped.
+    """
     try:
-        async with processing_semaphore:
-            # Run the processing in a separate thread to avoid blocking the event loop
-            result = await asyncio.to_thread(process_frame, data)
+        # Attempt to acquire the semaphore with a 200 ms timeout
+        await asyncio.wait_for(processing_semaphore.acquire(), timeout=0.2)
+    except asyncio.TimeoutError:
+        print("Processing queue is full. Dropping frame.")
+        return
 
-            # Send the processed frame back to the client
-            if result is not None:
-                print("Sending processed frame back to the client.")
-                try:
-                    if websocket.application_state == WebSocketState.CONNECTED:
-                        await websocket.send_bytes(result)
-                        print("Processed frame sent to client.")
-                    else:
-                        print("WebSocket is closed. Cannot send data.")
-                except Exception as e:
-                    print(f"Failed to send data: {e}")
-    except asyncio.CancelledError:
-        print("Task was cancelled.")
-    except Exception as e:
-        print(f"Exception in process_and_send_frame: {e}")
+    try:
+        try:
+            # Attempt to process the frame with a 200 ms timeout
+            result = await asyncio.wait_for(
+                asyncio.to_thread(process_frame, data),
+                timeout=0.2
+            )
+        except asyncio.TimeoutError:
+            print("Processing frame timed out. Dropping frame.")
+            return
+        except Exception as e:
+            print(f"Exception in processing frame: {e}")
+            return
+
+        # If processing was successful, send the frame back to the client
+        if result is not None:
+            print("Sending processed frame back to the client.")
+            try:
+                if websocket.application_state == WebSocketState.CONNECTED:
+                    await websocket.send_bytes(result)
+                    print("Processed frame sent to client.")
+                else:
+                    print("WebSocket is closed. Cannot send data.")
+            except Exception as e:
+                print(f"Failed to send data: {e}")
+    finally:
+        # Release the semaphore regardless of processing outcome
+        processing_semaphore.release()
 
 def process_frame(data):
+    """
+    Process the received frame and generate the output image.
+    This function runs in a separate thread.
+    """
     try:
         # Read current settings
         with settings_lock:
