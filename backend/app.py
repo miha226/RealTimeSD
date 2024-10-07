@@ -17,6 +17,10 @@ from DeepCache import DeepCacheSDHelper
 from pydantic import BaseModel
 from typing import Optional
 from sfast.compilers.diffusion_pipeline_compiler import (compile, CompilationConfig)
+import subprocess
+import collections
+import time
+import sys
 
 app = FastAPI()
 
@@ -256,9 +260,77 @@ async def startup_event():
     run_model = run_sdxlturbo
     print("Models loaded successfully.")
 
+    # Start the FFmpeg streaming thread
+    ffmpeg_thread = threading.Thread(target=ffmpeg_streamer, daemon=True)
+    ffmpeg_thread.start()
+    print("FFmpeg streaming thread started.")
+
 # Set a concurrency limit
 MAX_CONCURRENT_PROCESSES = 8  # Adjust based on your GPU capacity
 processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PROCESSES)
+
+# Initialize the image buffer
+image_buffer = collections.deque(maxlen=100)
+buffer_lock = threading.Lock()
+
+def ffmpeg_streamer():
+    """
+    This function runs in a separate thread and handles streaming images from the buffer using FFmpeg.
+    """
+    ffmpeg_command = [
+        'ffmpeg',
+        '-y',
+        '-f', 'rawvideo',
+        '-vcodec', 'rawvideo',
+        '-pix_fmt', 'rgb24',
+        '-s', f'{WIDTH}x{HEIGHT}',
+        '-r', '30',  # 30 fps
+        '-i', '-',  # Input comes from stdin
+        '-c:v', 'mpeg1video',
+        '-f', 'mpegts',
+        '-listen', '1',  # Listen as a server
+        'http://0.0.0.0:7000/stream.mpegts'  # Replace with your server's IP
+    ]
+
+    try:
+        process = subprocess.Popen(ffmpeg_command, stdin=subprocess.PIPE)
+        print("FFmpeg process started for streaming on port 7000.")
+
+        while True:
+            start_time = time.time()
+            with buffer_lock:
+                if image_buffer:
+                    frame = image_buffer.popleft()
+                    print("Popped image from buffer for streaming.")
+                else:
+                    # Create a black frame if buffer is empty
+                    frame = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
+                    print("Buffer empty. Using black frame.")
+
+            try:
+                # Write frame to FFmpeg's stdin
+                process.stdin.write(frame.tobytes())
+                print("Frame written to FFmpeg stdin.")
+            except BrokenPipeError:
+                print("FFmpeg pipe broken. Exiting streamer thread.")
+                break
+            except Exception as e:
+                print(f"Error writing frame to FFmpeg: {e}")
+                break
+
+            # Maintain 30 fps
+            elapsed = time.time() - start_time
+            sleep_time = max(0, (1/30) - elapsed)
+            time.sleep(sleep_time)
+
+    except Exception as e:
+        print(f"FFmpeg streaming error: {e}")
+    finally:
+        if process.stdin:
+            process.stdin.close()
+        process.wait()
+        print("FFmpeg process terminated.")
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -272,7 +344,7 @@ async def websocket_endpoint(websocket: WebSocket):
             print("Received data from client.")
 
             # Start a task to process the frame
-            task = asyncio.create_task(process_and_send_frame(data, websocket))
+            task = asyncio.create_task(process_and_buffer_frame(data))
             tasks.append(task)
 
     except WebSocketDisconnect:
@@ -288,9 +360,9 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close()
         print("WebSocket closed.")
 
-async def process_and_send_frame(data, websocket):
+async def process_and_buffer_frame(data):
     """
-    Process a single frame and send the result back to the client.
+    Process a single frame and add the result to the buffer.
     Implements a timeout of 200 ms for both acquiring the semaphore and processing the frame.
     If either step exceeds 200 ms, the frame is dropped.
     """
@@ -315,17 +387,11 @@ async def process_and_send_frame(data, websocket):
             print(f"Exception in processing frame: {e}")
             return
 
-        # If processing was successful, send the frame back to the client
+        # If processing was successful, add the frame to the buffer
         if result is not None:
-            print("Sending processed frame back to the client.")
-            try:
-                if websocket.application_state == WebSocketState.CONNECTED:
-                    await websocket.send_bytes(result)
-                    print("Processed frame sent to client.")
-                else:
-                    print("WebSocket is closed. Cannot send data.")
-            except Exception as e:
-                print(f"Failed to send data: {e}")
+            with buffer_lock:
+                image_buffer.append(result)
+                print("Processed frame added to buffer.")
     finally:
         # Release the semaphore regardless of processing outcome
         processing_semaphore.release()
@@ -393,12 +459,23 @@ def process_frame(data):
             else:
                 print("Image successfully generated by pipeline.")
 
-        # Convert the generated image back to a numpy array and encode it as JPEG
+        # Convert the generated image back to a numpy array
         result_image = np.array(gen_image)
-        _, buffer = cv.imencode('.jpg', cv.cvtColor(result_image, cv.COLOR_RGB2BGR))
-        print("Generated image encoded to JPEG format.")
+        if result_image is None:
+            print("Failed to convert generated image to numpy array.")
+            return None
 
-        return buffer.tobytes()
+        # Resize the image to match the desired dimensions
+        if result_image.shape[0] != HEIGHT or result_image.shape[1] != WIDTH:
+            result_image = cv.resize(result_image, (WIDTH, HEIGHT))
+            print(f"Resized generated image to {WIDTH}x{HEIGHT}.")
+
+        # Ensure the image is in RGB format
+        if result_image.shape[2] == 4:
+            result_image = cv.cvtColor(result_image, cv.COLOR_RGBA2RGB)
+            print("Converted generated image from RGBA to RGB.")
+
+        return result_image
 
     except Exception as e:
         print(f"Error in process_frame: {e}")
@@ -439,3 +516,35 @@ def update_settings(settings: Settings):
             CONDITIONING_SCALE = settings.conditioning_scale
             print(f"Updated conditioning scale to: {CONDITIONING_SCALE}")
     return {"status": "Settings updated successfully."}
+
+#################
+################# FFmpeg Streaming
+#################
+
+# Note:
+# Ensure that FFmpeg is installed and accessible in your system's PATH.
+# If FFmpeg is not installed, you can download it from https://ffmpeg.org/download.html
+
+# The FFmpeg streamer thread is started during the startup event.
+# It continuously reads images from the buffer and streams them at 30 fps.
+# If the buffer is empty, it sends a black frame instead.
+
+#################
+################# RUNNING THE SERVER
+#################
+
+# To run the FastAPI server, use the following command:
+# uvicorn your_script_name:app --host 0.0.0.0 --port 8000
+
+# Replace 'your_script_name' with the actual name of your Python script.
+
+# The video stream will be available on port 7000.
+# You can view the stream using a media player like VLC:
+# Open VLC and navigate to "Media" -> "Open Network Stream" and enter the URL:
+# http://localhost:7000
+
+# Ensure that the firewall allows traffic on port 7000 if accessing remotely.
+
+#################
+################# END OF CODE
+#################

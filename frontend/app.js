@@ -1,7 +1,7 @@
 // Attach currentTargetFPS to the window object for global access
 window.currentTargetFPS = 6; // Default FPS
 
-// Function to initialize the WebSocket and handle sending/receiving frames
+// Function to initialize the WebSocket and handle sending frames
 function initializeWebSocket(onOpenCallback) {
     const ws = new WebSocket('ws://20.172.32.213:8080/ws'); // Adjust the WebSocket server URL if needed
 
@@ -136,29 +136,13 @@ function sendFramesOverWebSocket(ws, stream) {
     };
 }
 
-// Function to receive processed frames from WebSocket and display them
-function receiveFramesFromWebSocket(ws) {
-    const remoteCanvas = document.getElementById('remoteVideo');
-    const context = remoteCanvas.getContext('2d');
-
-    ws.onmessage = (event) => {
-        // console.log("Received frame");
-        const blob = new Blob([event.data], { type: 'image/jpeg' });
-        const img = new Image();
-        console.log(`Received frame at ${Date.now() / 1000} seconds and ${Date.now()} milliseconds.`);
-
-        img.onload = () => {
-            context.drawImage(img, 0, 0, remoteCanvas.width, remoteCanvas.height);
-            URL.revokeObjectURL(img.src); // Clean up the object URL
-        };
-
-        img.onerror = (err) => {
-            console.error('Image load error:', err);
-            URL.revokeObjectURL(img.src);
-        };
-
-        img.src = URL.createObjectURL(blob);
-    };
+// Function to set the remote video stream
+function setRemoteVideoStream() {
+    const remoteVideo = document.getElementById('remoteVideo');
+    remoteVideo.src = 'http://20.172.32.213:7000/stream.mpegts'; // Adjust the URL to match your server's IP and path
+    remoteVideo.play().catch(error => {
+        console.error('Error playing remote video stream:', error);
+    });
 }
 
 // Function to send settings to the backend
@@ -195,10 +179,6 @@ async function sendSettings(settings) {
         statusMessage.textContent = '';
     }, 5000);
 }
-
-// Function to send FPS settings to the backend (if needed in future)
-// Currently, Target FPS is handled entirely on the client side
-// If backend needs to know about FPS, implement here
 
 // Function to handle settings form submission
 function handleSettingsForm() {
@@ -306,7 +286,8 @@ async function startCameraStream() {
     if (stream) {
         const ws = initializeWebSocket((ws) => {
             sendFramesOverWebSocket(ws, stream);
-            receiveFramesFromWebSocket(ws);
+            // Removed receiveFramesFromWebSocket(ws);
+            setRemoteVideoStream(); // Start playing the remote video stream
         });
     }
 }

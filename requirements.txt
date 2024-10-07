@@ -14,3 +14,5 @@ fastapi
 wheel
 triton
 DeepCache
+ffmpeg
+ffmpeg-python

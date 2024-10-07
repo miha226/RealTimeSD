@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <title>Camera Stream with Settings</title>
   <style>
+    /* (Existing styles remain unchanged) */
     body {
       font-family: Arial, sans-serif;
       margin: 20px;
@@ -55,7 +56,7 @@
   </style>
 </head>
 <body>
-  <h1>WebSocket Camera Stream with Custom Settings</h1>
+  <h1>Camera Stream with Custom Settings</h1>
 
   <!-- Settings Form -->
   <div class="settings-container">
@@ -101,8 +102,8 @@
     <!-- Local video stream -->
     <video id="localVideo" autoplay playsinline width="512" height="512"></video>
 
-    <!-- Received video stream -->
-    <canvas id="remoteVideo" width="512" height="512"></canvas>
+    <!-- Remote video stream (from FFmpeg) -->
+    <video id="remoteVideo" autoplay playsinline width="512" height="512" controls></video>
   </div>
 
   <script src="app.js" type="module"></script>
