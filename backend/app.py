@@ -1,6 +1,7 @@
+# app.py
 import cv2 as cv
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance
 from diffusers import (
     StableDiffusionXLControlNetImg2ImgPipeline,
     ControlNetModel,
@@ -12,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import threading
 from starlette.websockets import WebSocketState
-from transformers import DPTImageProcessor, DPTForDepthEstimation
+from transformers import AutoImageProcessor, AutoModelForDepthEstimation  # Updated Imports
 from DeepCache import DeepCacheSDHelper
 from pydantic import BaseModel
 from typing import Optional
@@ -34,11 +35,11 @@ app.add_middleware(
 
 # Global variables to hold models
 pipeline = None
-depth_estimator = None
-feature_extractor = None
+depth_estimator = None  # Updated
+image_processor = None   # Updated
 run_model = None
 
-DEFAULT_PROMPT = "photo of city glass skyscrapers, 4K, realistic, smooth transition"
+DEFAULT_PROMPT = "Aerial view of a futuristic residential area featuring a variety of modern homes, including a large, luxurious mansion and smaller houses. The architecture blends sleek glass, metal, and greenery, with solar panels and green rooftops on each building. Winding pathways and roads connect the homes, surrounded by landscaped gardens and small parks with trees and ponds. The area is designed with sustainability in mind, with electric vehicles on the streets and communal green spaces. The scene is well-lit with natural sunlight, showcasing the clean lines and innovative design of the neighborhood from above"
 MODEL = "sdxlturbo"  # "lcm" or "sdxlturbo"
 SDXLTURBO_MODEL_LOCATION = 'models/sdxl-turbo'
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -47,7 +48,7 @@ TORCH_DTYPE = torch.float16
 GUIDANCE_SCALE = 0  # Higher guidance scale for better prompt adherence
 INFERENCE_STEPS = 2  # 4 for lcm (high quality), 2 for turbo
 DEFAULT_NOISE_STRENGTH = 0.5  # 0.5 or 0.7 works well too
-CONDITIONING_SCALE = 0.5  # 0.5 or 0.7 works well too
+CONDITIONING_SCALE = 0.7  # 0.5 or 0.7 works well too
 GUIDANCE_START = 0.0
 GUIDANCE_END = 1.0
 RANDOM_SEED = 21
@@ -81,35 +82,48 @@ def convert_numpy_image_to_pil_image(image):
         print(f"Error converting numpy image to PIL image: {e}")
         return None
 
-def get_depth_map(image):
-    try:
-        # Preprocess the image for depth estimation
-        inputs = feature_extractor(images=image, return_tensors="pt").pixel_values.to(TORCH_DEVICE)
-        with torch.no_grad():
-            with torch.autocast("cuda"):
-                depth = depth_estimator(inputs).predicted_depth
+def get_depth_map(image, contrast_factor=1.5):
+    """
+    Generates a depth map using the Depth Anything model and enhances its contrast.
 
-        # Resize depth map to match desired size
-        depth = torch.nn.functional.interpolate(
-            depth.unsqueeze(1),
-            size=(HEIGHT, WIDTH),
+    Args:
+        image (PIL.Image.Image): The input image.
+        contrast_factor (float): The factor by which to enhance the contrast.
+
+    Returns:
+        PIL.Image.Image: The contrast-enhanced depth map.
+    """
+    try:
+        # Preprocess the image for depth estimation using Depth Anything
+        inputs = image_processor(images=image, return_tensors="pt")
+        inputs = {k: v.to(TORCH_DEVICE) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            outputs = depth_estimator(**inputs)
+            predicted_depth = outputs.predicted_depth
+
+        # Interpolate to original size
+        prediction = torch.nn.functional.interpolate(
+            predicted_depth.unsqueeze(1),
+            size=image.size[::-1],
             mode="bicubic",
             align_corners=False,
         )
+
         # Normalize the depth map
-        depth_min = torch.amin(depth, dim=[1, 2, 3], keepdim=True)
-        depth_max = torch.amax(depth, dim=[1, 2, 3], keepdim=True)
-        depth = (depth - depth_min) / (depth_max - depth_min)
-        # Convert to 3 channels
-        depth = torch.cat([depth] * 3, dim=1)
-        # Convert to PIL Image
-        depth = depth.permute(0, 2, 3, 1).cpu().numpy()[0]
-        depth_image = Image.fromarray((depth * 255.0).clip(0, 255).astype(np.uint8))
-        print("Depth map generated successfully.")
+        prediction = prediction.squeeze().cpu().numpy()
+        formatted = (prediction * 255 / np.max(prediction)).astype("uint8")
+        depth_image = Image.fromarray(formatted)
+
+        # Enhance Contrast
+        enhancer = ImageEnhance.Contrast(depth_image)
+        depth_image = enhancer.enhance(contrast_factor)
+        print(f"Depth map generated and contrast enhanced by a factor of {contrast_factor}.")
         return depth_image
     except Exception as e:
-        print(f"Error generating depth map: {e}")
+        print(f"Error generating depth map with Depth Anything: {e}")
         return None
+
 
 def prepare_sdxlturbo_pipeline():
     try:
@@ -229,16 +243,20 @@ def run_sdxlturbo(pipeline, source_image, control_image, generator, prompt, num_
 
 @app.on_event("startup")
 async def startup_event():
-    global pipeline, depth_estimator, feature_extractor, run_model
+    global pipeline, depth_estimator, image_processor, run_model  # Updated
 
     print("FastAPI application is starting... Loading models into GPU.")
     try:
-        # Load depth estimator and processor
-        depth_estimator = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas").to(TORCH_DEVICE)
-        feature_extractor = DPTImageProcessor.from_pretrained("Intel/dpt-hybrid-midas")
-        print("Depth estimator and feature extractor loaded.")
+        # Load depth estimator and processor using Depth Anything
+        depth_estimator = AutoModelForDepthEstimation.from_pretrained(
+            "depth-anything/Depth-Anything-V2-Small-hf"
+        ).to(TORCH_DEVICE)
+        image_processor = AutoImageProcessor.from_pretrained(
+            "depth-anything/Depth-Anything-V2-Small-hf"
+        )
+        print("Depth Anything model and processor loaded.")
     except Exception as e:
-        print(f"Error loading depth estimator or feature extractor: {e}")
+        print(f"Error loading Depth Anything model or processor: {e}")
         raise e
 
     try:
@@ -257,7 +275,7 @@ async def startup_event():
     print("Models loaded successfully.")
 
 # Set a concurrency limit
-MAX_CONCURRENT_PROCESSES = 8  # Adjust based on your GPU capacity
+MAX_CONCURRENT_PROCESSES = 10  # Adjust based on your GPU capacity
 processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PROCESSES)
 
 @app.websocket("/ws")
@@ -296,7 +314,7 @@ async def process_and_send_frame(data, websocket):
     """
     try:
         # Attempt to acquire the semaphore with a 200 ms timeout
-        await asyncio.wait_for(processing_semaphore.acquire(), timeout=0.2)
+        await asyncio.wait_for(processing_semaphore.acquire(), timeout=1)
     except asyncio.TimeoutError:
         print("Processing queue is full. Dropping frame.")
         return
@@ -306,7 +324,7 @@ async def process_and_send_frame(data, websocket):
             # Attempt to process the frame with a 200 ms timeout
             result = await asyncio.wait_for(
                 asyncio.to_thread(process_frame, data),
-                timeout=0.2
+                timeout=1
             )
         except asyncio.TimeoutError:
             print("Processing frame timed out. Dropping frame.")
@@ -364,14 +382,15 @@ def process_frame(data):
         else:
             print("Conversion of source image to PIL image successful.")
 
-        # Generate the depth map as the control image
+        # Generate the depth map as the control image using Depth Anything
         control_image = get_depth_map(pil_source_image)
         if control_image is None:
             print("Depth map generation failed.")
             return None
         else:
-            print("Depth map generated successfully.")
+            print("Depth map generated successfully using Depth Anything.")
 
+        
         # Prepare a per-thread random number generator
         generator = prepare_seed(seed)
 
