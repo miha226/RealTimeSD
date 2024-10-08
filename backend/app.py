@@ -80,18 +80,26 @@ def convert_numpy_image_to_pil_image(image):
 
 def get_normal_map(image):
     try:
+        # Generate the normal map as a NumPy array using OpenCV
         normal = normal_detector(image, hand_and_face=False, output_type='cv2')
-        # Resize to match desired size
-        height, width, _ = normal.shape
-        ratio = np.sqrt((WIDTH * HEIGHT) / (width * height))
+        
+        # need to resize the image resolution to 1024 * 1024 or same bucket resolution to get the best performance
+        height, width, _  = normal.shape
+        print("Height: {}, Width: {}".format(height, width))
+        ratio = np.sqrt(512. * 512. / (width * height))
+        print("Ratio: {}".format(ratio))
         new_width, new_height = int(width * ratio), int(height * ratio)
+        print("New Width: {}, New Height: {}".format(new_width, new_height))
         normal = cv.resize(normal, (new_width, new_height))
         normal = Image.fromarray(normal)
-        print("Normal map generated successfully.")
+        print("normaly type: {}".format(type(normal)))
+        print("Normal map generated, resized, and padded successfully.")
+        
         return normal
     except Exception as e:
         print(f"Error generating normal map: {e}")
         return None
+
 
 def prepare_sdxlturbo_pipeline():
     global pipeline
@@ -99,10 +107,9 @@ def prepare_sdxlturbo_pipeline():
         # Load the normal ControlNet model
         controlnet = ControlNetModel_Union.from_pretrained(
             "xinsir/controlnet-union-sdxl-1.0",
-            variant="fp16",
             use_safetensors=True,
             torch_dtype=torch.float16,
-        )
+        ).to(TORCH_DEVICE)
         print("Normal ControlNet model loaded.")
     except Exception as e:
         print(f"Error loading ControlNet model: {e}")
@@ -257,7 +264,7 @@ async def startup_event():
     print("Models loaded successfully.")
 
 # Set a concurrency limit
-MAX_CONCURRENT_PROCESSES = 8  # Adjust based on your GPU capacity
+MAX_CONCURRENT_PROCESSES = 1  # Adjust based on your GPU capacity
 processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PROCESSES)
 
 @app.websocket("/ws")
@@ -296,7 +303,7 @@ async def process_and_send_frame(data, websocket):
     """
     try:
         # Attempt to acquire the semaphore with a 200 ms timeout
-        await asyncio.wait_for(processing_semaphore.acquire(), timeout=0.2)
+        await asyncio.wait_for(processing_semaphore.acquire(), timeout=1)
     except asyncio.TimeoutError:
         print("Processing queue is full. Dropping frame.")
         return
@@ -306,7 +313,7 @@ async def process_and_send_frame(data, websocket):
             # Attempt to process the frame with a 200 ms timeout
             result = await asyncio.wait_for(
                 asyncio.to_thread(process_frame, data),
-                timeout=0.2
+                timeout=1
             )
         except asyncio.TimeoutError:
             print("Processing frame timed out. Dropping frame.")
