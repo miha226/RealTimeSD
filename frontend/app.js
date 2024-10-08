@@ -243,7 +243,7 @@ function handleSettingsForm() {
 
         if (noiseStrengthValue !== "") {
             const noise_strength = parseFloat(noiseStrengthValue);
-            if (!isNaN(noise_strength) && noise_strength >= 0.5 && noise_strength <= 1) { // Ensure 0.5 <= noise_strength <= 1
+            if (!isNaN(noise_strength) && noise_strength >= 0.5 && noise_strength <= 5) { // Ensure 0.5 <= noise_strength <= 1
                 settings.noise_strength = noise_strength;
             } else {
                 alert('Noise Strength must be a number between 0.5 and 1.0.');
@@ -253,7 +253,7 @@ function handleSettingsForm() {
 
         if (conditioningScaleValue !== "") {
             const conditioning_scale = parseFloat(conditioningScaleValue);
-            if (!isNaN(conditioning_scale) && conditioning_scale >= 0 && conditioning_scale <= 1) {
+            if (!isNaN(conditioning_scale) && conditioning_scale >= 0 && conditioning_scale <= 5) {
                 settings.conditioning_scale = conditioning_scale;
             } else {
                 alert('Conditioning Scale must be a number between 0.0 and 1.0.');
