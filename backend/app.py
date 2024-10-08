@@ -160,6 +160,7 @@ def prepare_sdxlturbo_pipeline():
             torch_dtype=TORCH_DTYPE,
         ).to(TORCH_DEVICE)
 
+
         #helper = DeepCacheSDHelper(pipe=pipe)
         #helper.set_params(cache_interval=3, cache_branch_id=0)
         #helper.enable()
