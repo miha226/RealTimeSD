@@ -1,6 +1,6 @@
 import cv2 as cv
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance
 from diffusers import AutoencoderTiny
 import torch
 from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect
@@ -15,6 +15,12 @@ from typing import Optional, Union, List, Callable, Dict, Any, Tuple
 from sfast.compilers.diffusion_pipeline_compiler import (compile, CompilationConfig)
 from pipeline_controlnet_union_sd_xl_img2img import StableDiffusionXLControlNetUnionImg2ImgPipeline
 from controlnet_union import ControlNetModel_Union
+from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+from diffusers import StableDiffusionControlNetImg2ImgPipeline, ControlNetModel
+from diffusers import (
+    StableDiffusionControlNetPipeline,
+    UniPCMultistepScheduler,
+)
 
 app = FastAPI()
 
@@ -34,10 +40,13 @@ app.add_middleware(
 pipeline = None
 normal_detector = None
 run_model = None
+depth_estimator = None  # Updated
+image_processor = None   # Updated
+
 
 DEFAULT_PROMPT = "photo of city glass skyscrapers, 4K, realistic, smooth transition"
 MODEL = "sdxlturbo"  # "lcm" or "sdxlturbo"
-SDXLTURBO_MODEL_LOCATION = 'models/sdxl-turbo'
+SDXLTURBO_MODEL_LOCATION = 'models/sd-turbo'
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 VARIANT = "fp16"
 TORCH_DTYPE = torch.float16
@@ -100,13 +109,82 @@ def get_normal_map(image):
         print(f"Error generating normal map: {e}")
         return None
 
+def get_depth_map(image, contrast_factor=1.5):
+    """
+    Generates a depth map using the Depth Anything model and enhances its contrast.
+
+    Args:
+        image (PIL.Image.Image): The input image.
+        contrast_factor (float): The factor by which to enhance the contrast.
+
+    Returns:
+        PIL.Image.Image: The contrast-enhanced depth map.
+    """
+    try:
+        # Preprocess the image for depth estimation using Depth Anything
+        inputs = image_processor(images=image, return_tensors="pt")
+        inputs = {k: v.to(TORCH_DEVICE) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            outputs = depth_estimator(**inputs)
+            predicted_depth = outputs.predicted_depth
+
+        # Interpolate to original size
+        prediction = torch.nn.functional.interpolate(
+            predicted_depth.unsqueeze(1),
+            size=image.size[::-1],
+            mode="bicubic",
+            align_corners=False,
+        )
+
+        # Normalize the depth map
+        prediction = prediction.squeeze().cpu().numpy()
+        formatted = (prediction * 255 / np.max(prediction)).astype("uint8")
+        depth_image = Image.fromarray(formatted)
+
+        # Enhance Contrast
+        #enhancer = ImageEnhance.Contrast(depth_image)
+        #depth_image = enhancer.enhance(contrast_factor)
+        #print(f"Depth map generated and contrast enhanced by a factor of {contrast_factor}.")
+        return depth_image
+    except Exception as e:
+        print(f"Error generating depth map with Depth Anything: {e}")
+        return None
+    
+
+def depth_to_normal_map(depth_image, bg_threshold=3):
+    # Convert the depth map to a NumPy array
+    depth_np = np.array(depth_image).astype(np.float32)
+    
+    # Normalize depth map to range [0, 1]
+    depth_np -= np.min(depth_np)
+    depth_np /= np.max(depth_np)
+    
+    # Calculate gradients using Sobel operator
+    sobel_x = cv.Sobel(depth_np, cv.CV_32F, 1, 0, ksize=3)
+    sobel_y = cv.Sobel(depth_np, cv.CV_32F, 0, 1, ksize=3)
+    
+    # Set a constant for z-axis
+    sobel_z = np.ones_like(sobel_x) * np.pi * 2.0
+
+    # Stack and normalize gradients to create normal map
+    normal_map = np.stack([sobel_x, sobel_y, sobel_z], axis=2)
+    normal_map /= np.sqrt(np.sum(normal_map ** 2, axis=2, keepdims=True) + 1e-8)
+    
+    # Convert normals to 0-255 range
+    normal_map = ((normal_map + 1.0) / 2.0 * 255.0).astype(np.uint8)
+    
+    # Create PIL image from NumPy array
+    normal_map_image = Image.fromarray(normal_map)
+    
+    return normal_map_image
 
 def prepare_sdxlturbo_pipeline():
     global pipeline
     try:
         # Load the normal ControlNet model
-        controlnet = ControlNetModel_Union.from_pretrained(
-            "xinsir/controlnet-union-sdxl-1.0",
+        controlnet = ControlNetModel.from_pretrained(
+            "lllyasviel/control_v11p_sd15_normalbae",
             use_safetensors=True,
             torch_dtype=torch.float16,
         ).to(TORCH_DEVICE)
@@ -127,7 +205,7 @@ def prepare_sdxlturbo_pipeline():
         return None
 
     try:
-        pipe = StableDiffusionXLControlNetUnionImg2ImgPipeline.from_pretrained(
+        pipe = StableDiffusionControlNetPipeline.from_pretrained(
             SDXLTURBO_MODEL_LOCATION,
             controlnet=controlnet,
             vae=vae,
@@ -212,24 +290,23 @@ def run_sdxlturbo(
         # Prepare the control_image_list
         # The list length should match the number of control types supported by the pipeline
         control_image_list = [None, None, None, None, control_image, None]
-
+        print("Stage 1")
         gen_image = pipeline(
             prompt=prompt,
-            image=source_image,  # Source image
-            control_image_list=control_image_list,  # Control images
-            union_control=True,
-            union_control_type=union_control_type,
+            image=control_image,  # Source image
+            #control_image_list=control_image_list,  # Control images
+            #union_control=True,
+            #union_control_type=union_control_type,
             num_inference_steps=num_inference_steps,
             guidance_scale=GUIDANCE_SCALE,
-            strength=strength,
-            conditioning_scale=conditioning_scale,
+            #strength=strength,
+            controlnet_conditioning_scale=conditioning_scale,
             height=HEIGHT,
             width=WIDTH,
-            generator=generator,
-            output_type="pil",
-            return_dict=True
+            generator=generator
         ).images[0]
         print("Pipeline successfully generated image.")
+        print("Stage 2")
         return gen_image
     except Exception as e:
         print(f"Error during pipeline execution: {e}")
@@ -237,7 +314,7 @@ def run_sdxlturbo(
 
 @app.on_event("startup")
 async def startup_event():
-    global pipeline, normal_detector, run_model
+    global pipeline, normal_detector, run_model, depth_estimator, image_processor
 
     print("FastAPI application is starting... Loading models into GPU.")
     try:
@@ -246,6 +323,20 @@ async def startup_event():
         print("Normal detector loaded.")
     except Exception as e:
         print(f"Error loading normal detector: {e}")
+        raise e
+    
+    print("FastAPI application is starting... Loading models into GPU.")
+    try:
+        # Load depth estimator and processor using Depth Anything
+        depth_estimator = AutoModelForDepthEstimation.from_pretrained(
+            "depth-anything/Depth-Anything-V2-Small-hf"
+        ).to(TORCH_DEVICE)
+        image_processor = AutoImageProcessor.from_pretrained(
+            "depth-anything/Depth-Anything-V2-Small-hf"
+        )
+        print("Depth Anything model and processor loaded.")
+    except Exception as e:
+        print(f"Error loading Depth Anything model or processor: {e}")
         raise e
 
     try:
@@ -372,13 +463,20 @@ def process_frame(data):
             print("Conversion of source image to PIL image successful.")
 
         # Generate the normal map as the control image
-        control_image = get_normal_map(pil_source_image)
+        #control_image = depth_to_normal_map(get_depth_map(pil_source_image))
+        control_image=get_normal_map(pil_source_image)
         if control_image is None:
             print("Normal map generation failed.")
             return None
         else:
             print("Normal map generated successfully.")
 
+
+        result_image = np.array(control_image)
+        _, buffer = cv.imencode('.jpg', cv.cvtColor(result_image, cv.COLOR_RGB2BGR))
+        print("Generated image encoded to JPEG format.")
+
+        return buffer.tobytes()
         # Prepare a per-thread random number generator
         generator = prepare_seed(seed)
 
