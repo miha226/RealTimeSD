@@ -1,22 +1,20 @@
 import cv2 as cv
 import numpy as np
 from PIL import Image
-from diffusers import (
-    StableDiffusionXLControlNetImg2ImgPipeline,
-    ControlNetModel,
-    AutoencoderTiny
-)
+from diffusers import AutoencoderTiny
 import torch
 from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import threading
 from starlette.websockets import WebSocketState
-from transformers import DPTImageProcessor, DPTForDepthEstimation
+from controlnet_aux import NormalBaeDetector
 from DeepCache import DeepCacheSDHelper
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Union, List, Callable, Dict, Any, Tuple
 from sfast.compilers.diffusion_pipeline_compiler import (compile, CompilationConfig)
+from pipeline_controlnet_union_sd_xl_img2img import StableDiffusionXLControlNetUnionImg2ImgPipeline
+from controlnet_union import ControlNetModel_Union
 
 app = FastAPI()
 
@@ -34,8 +32,7 @@ app.add_middleware(
 
 # Global variables to hold models
 pipeline = None
-depth_estimator = None
-feature_extractor = None
+normal_detector = None
 run_model = None
 
 DEFAULT_PROMPT = "photo of city glass skyscrapers, 4K, realistic, smooth transition"
@@ -44,15 +41,15 @@ SDXLTURBO_MODEL_LOCATION = 'models/sdxl-turbo'
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 VARIANT = "fp16"
 TORCH_DTYPE = torch.float16
-GUIDANCE_SCALE = 0  # Higher guidance scale for better prompt adherence
-INFERENCE_STEPS = 2  # 4 for lcm (high quality), 2 for turbo
-DEFAULT_NOISE_STRENGTH = 0.5  # 0.5 or 0.7 works well too
-CONDITIONING_SCALE = 0.5  # 0.5 or 0.7 works well too
+GUIDANCE_SCALE = 0  # Adjusted to a typical value for guidance
+INFERENCE_STEPS = 2  # Adjusted based on your example
+DEFAULT_NOISE_STRENGTH = 0.5  # Adjusted to match the pipeline's strength parameter
+CONDITIONING_SCALE = 0.7  # Adjusted to match the pipeline's controlnet_conditioning_scale
 GUIDANCE_START = 0.0
 GUIDANCE_END = 1.0
 RANDOM_SEED = 21
-HEIGHT = 512
-WIDTH = 512
+HEIGHT = 512  # Adjusted based on your example
+WIDTH = 512   # Adjusted based on your example
 
 # Create threading locks for the pipeline and settings
 pipeline_lock = threading.Lock()
@@ -81,46 +78,32 @@ def convert_numpy_image_to_pil_image(image):
         print(f"Error converting numpy image to PIL image: {e}")
         return None
 
-def get_depth_map(image):
+def get_normal_map(image):
     try:
-        # Preprocess the image for depth estimation
-        inputs = feature_extractor(images=image, return_tensors="pt").pixel_values.to(TORCH_DEVICE)
-        with torch.no_grad():
-            with torch.autocast("cuda"):
-                depth = depth_estimator(inputs).predicted_depth
-
-        # Resize depth map to match desired size
-        depth = torch.nn.functional.interpolate(
-            depth.unsqueeze(1),
-            size=(HEIGHT, WIDTH),
-            mode="bicubic",
-            align_corners=False,
-        )
-        # Normalize the depth map
-        depth_min = torch.amin(depth, dim=[1, 2, 3], keepdim=True)
-        depth_max = torch.amax(depth, dim=[1, 2, 3], keepdim=True)
-        depth = (depth - depth_min) / (depth_max - depth_min)
-        # Convert to 3 channels
-        depth = torch.cat([depth] * 3, dim=1)
-        # Convert to PIL Image
-        depth = depth.permute(0, 2, 3, 1).cpu().numpy()[0]
-        depth_image = Image.fromarray((depth * 255.0).clip(0, 255).astype(np.uint8))
-        print("Depth map generated successfully.")
-        return depth_image
+        normal = normal_detector(image, hand_and_face=False, output_type='cv2')
+        # Resize to match desired size
+        height, width, _ = normal.shape
+        ratio = np.sqrt((WIDTH * HEIGHT) / (width * height))
+        new_width, new_height = int(width * ratio), int(height * ratio)
+        normal = cv.resize(normal, (new_width, new_height))
+        normal = Image.fromarray(normal)
+        print("Normal map generated successfully.")
+        return normal
     except Exception as e:
-        print(f"Error generating depth map: {e}")
+        print(f"Error generating normal map: {e}")
         return None
 
 def prepare_sdxlturbo_pipeline():
+    global pipeline
     try:
-        # Load the depth ControlNet model
-        controlnet = ControlNetModel.from_pretrained(
-            "diffusers/controlnet-depth-sdxl-1.0-small",
+        # Load the normal ControlNet model
+        controlnet = ControlNetModel_Union.from_pretrained(
+            "xinsir/controlnet-union-sdxl-1.0",
             variant="fp16",
             use_safetensors=True,
             torch_dtype=torch.float16,
         )
-        print("Depth ControlNet model loaded.")
+        print("Normal ControlNet model loaded.")
     except Exception as e:
         print(f"Error loading ControlNet model: {e}")
         return None
@@ -137,7 +120,7 @@ def prepare_sdxlturbo_pipeline():
         return None
 
     try:
-        pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
+        pipe = StableDiffusionXLControlNetUnionImg2ImgPipeline.from_pretrained(
             SDXLTURBO_MODEL_LOCATION,
             controlnet=controlnet,
             vae=vae,
@@ -149,17 +132,14 @@ def prepare_sdxlturbo_pipeline():
         #helper = DeepCacheSDHelper(pipe=pipe)
         #helper.set_params(cache_interval=3, cache_branch_id=0)
         #helper.enable()
-
         print("Pipeline loaded and moved to device.")
     except Exception as e:
         print(f"Error loading pipeline: {e}")
         return None
 
-    # #########################
+    #########################
     # 5. Enabling xformers and Triton (Optional)
-    # #########################
-
-    # Uncomment the following lines if you decide to use the 'sfast' compiler
+    #########################
 
     config = CompilationConfig.Default()
 
@@ -191,12 +171,12 @@ def prepare_sdxlturbo_pipeline():
     config.preserve_parameters = False
     config.prefer_lowp_gemm = True
 
-    # #########################
+    #########################
     # 6. Compiling the Pipeline (Optional)
-    # #########################
+    #########################
 
     try:
-        pipe = compile(pipe, config)
+        #pipe = compile(pipe, config)
         print("Pipeline compiled with optimizations.")
     except ImportError:
         print("Compiler module 'sfast' not found. Skipping pipeline compilation.")
@@ -207,19 +187,40 @@ def prepare_sdxlturbo_pipeline():
     pipeline = pipe
     return pipeline
 
-def run_sdxlturbo(pipeline, source_image, control_image, generator, prompt, num_inference_steps, strength, conditioning_scale):
+def run_sdxlturbo(
+    pipeline,
+    source_image,
+    control_image,
+    generator,
+    prompt,
+    num_inference_steps,
+    strength,
+    conditioning_scale
+):
     try:
+        # Define the union_control_type tensor
+        # Assuming index 4 corresponds to normal maps based on your example
+        union_control_type = torch.Tensor([0, 0, 0, 0, 1, 0]).to(TORCH_DEVICE)
+
+        # Prepare the control_image_list
+        # The list length should match the number of control types supported by the pipeline
+        control_image_list = [None, None, None, None, control_image, None]
+
         gen_image = pipeline(
             prompt=prompt,
+            image=source_image,  # Source image
+            control_image_list=control_image_list,  # Control images
+            union_control=True,
+            union_control_type=union_control_type,
             num_inference_steps=num_inference_steps,
-            guidance_scale=GUIDANCE_SCALE,  # Keeping it as default
-            width=WIDTH,
-            height=HEIGHT,
-            generator=generator,
-            image=source_image,                # Source image
-            control_image=control_image,        # Control image (depth map)
+            guidance_scale=GUIDANCE_SCALE,
             strength=strength,
-            controlnet_conditioning_scale=conditioning_scale,
+            conditioning_scale=conditioning_scale,
+            height=HEIGHT,
+            width=WIDTH,
+            generator=generator,
+            output_type="pil",
+            return_dict=True
         ).images[0]
         print("Pipeline successfully generated image.")
         return gen_image
@@ -229,16 +230,15 @@ def run_sdxlturbo(pipeline, source_image, control_image, generator, prompt, num_
 
 @app.on_event("startup")
 async def startup_event():
-    global pipeline, depth_estimator, feature_extractor, run_model
+    global pipeline, normal_detector, run_model
 
     print("FastAPI application is starting... Loading models into GPU.")
     try:
-        # Load depth estimator and processor
-        depth_estimator = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas").to(TORCH_DEVICE)
-        feature_extractor = DPTImageProcessor.from_pretrained("Intel/dpt-hybrid-midas")
-        print("Depth estimator and feature extractor loaded.")
+        # Load normal detector
+        normal_detector = NormalBaeDetector.from_pretrained('lllyasviel/Annotators')
+        print("Normal detector loaded.")
     except Exception as e:
-        print(f"Error loading depth estimator or feature extractor: {e}")
+        print(f"Error loading normal detector: {e}")
         raise e
 
     try:
@@ -364,13 +364,13 @@ def process_frame(data):
         else:
             print("Conversion of source image to PIL image successful.")
 
-        # Generate the depth map as the control image
-        control_image = get_depth_map(pil_source_image)
+        # Generate the normal map as the control image
+        control_image = get_normal_map(pil_source_image)
         if control_image is None:
-            print("Depth map generation failed.")
+            print("Normal map generation failed.")
             return None
         else:
-            print("Depth map generated successfully.")
+            print("Normal map generated successfully.")
 
         # Prepare a per-thread random number generator
         generator = prepare_seed(seed)
