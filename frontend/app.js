@@ -1,5 +1,5 @@
 // Attach currentTargetFPS to the window object for global access
-window.currentTargetFPS = 6; // Default FPS
+window.currentTargetFPS = 1; // Default FPS
 
 // Function to initialize the WebSocket and handle sending/receiving frames
 function initializeWebSocket(onOpenCallback) {
