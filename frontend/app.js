@@ -210,9 +210,9 @@ function handleSettingsForm() {
         // Gather the form data
         const prompt = document.getElementById('prompt').value.trim();
         const seedValue = document.getElementById('seed').value.trim();
-        const inferenceStepsValue = document.getElementById('inference_steps').value.trim();
+        /*const inferenceStepsValue = document.getElementById('inference_steps').value.trim();
         const noiseStrengthValue = document.getElementById('noise_strength').value.trim();
-        const conditioningScaleValue = document.getElementById('conditioning_scale').value.trim();
+        const conditioningScaleValue = document.getElementById('conditioning_scale').value.trim();*/
 
         // Prepare the settings object, only include fields that have been modified
         const settings = {};
@@ -231,7 +231,7 @@ function handleSettingsForm() {
             }
         }
 
-        if (inferenceStepsValue !== "") {
+        /*if (inferenceStepsValue !== "") {
             const inference_steps = parseInt(inferenceStepsValue, 10);
             if (!isNaN(inference_steps) && inference_steps >= 2) { // Ensure inference_steps >= 2
                 settings.inference_steps = inference_steps;
@@ -259,7 +259,7 @@ function handleSettingsForm() {
                 alert('Conditioning Scale must be a number between 0.0 and 1.0.');
                 return;
             }
-        }
+        }*/
 
         // Send the settings to the backend
         sendSettings(settings);
