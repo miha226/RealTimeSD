@@ -4,11 +4,17 @@ import numpy as np
 from PIL import Image, ImageEnhance
 from diffusers import (
     StableDiffusionXLControlNetImg2ImgPipeline,
+    StableDiffusionControlNetPipeline,
     ControlNetModel,
-    AutoencoderTiny
+    AutoencoderTiny,
+    LCMScheduler,
+    DPMSolverMultistepScheduler,
+    DiffusionPipeline,
+    UNet2DConditionModel,
+    UniPCMultistepScheduler
 )
 import torch
-from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect
+from fastapi import FastAPI, File, UploadFile, WebSocket, HTTPException, WebSocketDisconnect, Response
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import threading
@@ -38,28 +44,27 @@ pipeline = None
 depth_estimator = None  # Updated
 image_processor = None   # Updated
 run_model = None
-last_generated_image = None
 
-DEFAULT_PROMPT = "Aerial view of a futuristic residential area featuring a variety of modern homes, including a large, luxurious mansion and smaller houses. The architecture blends sleek glass, metal, and greenery, with solar panels and green rooftops on each building. Winding pathways and roads connect the homes, surrounded by landscaped gardens and small parks with trees and ponds. The area is designed with sustainability in mind, with electric vehicles on the streets and communal green spaces. The scene is well-lit with natural sunlight, showcasing the clean lines and innovative design of the neighborhood from above"
+DEFAULT_PROMPT = "Architecture, city, sunshine, day, urban landscape, skyscrapers, scenery, white clouds, buildings, bridges, sky, city lights, blue sky, east_ Asia_ Architecture, mountains, rivers, pagodas, outdoor, trees, tokyo_\\ (City )<lora:20_a:0.2>"
+DEFAULT_NEGATIVE_PROMPT = "water, lake water.,2 faces, cropped image, out of frame, draft, deformed hands, signatures, twisted fingers, double image, long neck, malformed hands, multiple heads, extra limb, poorly drawn hands, missing limb, disfigured, cut-off, low-res, deformed, blurry, bad anatomy, mutation, mutated, floating limbs, disconnected limbs, long body, disgusting, poorly drawn, mutilated, mangled, extra fingers, duplicate artifacts, morbid, gross proportions, missing arms, mutated hands, mutilated hands, malformed, tiling, poorly drawn hands, poorly drawn feet, poorly drawn face, out of frame, extra limbs, disfigured, deformed, body out of frame, bad anatomy, watermark, signature, cut off, low contrast, underexposed, overexposed, bad art, beginner, amateur, distorted face, blurry, draft, grainy."
 MODEL = "sdxlturbo"  # "lcm" or "sdxlturbo"
 SDXLTURBO_MODEL_LOCATION = 'models/sdxl-turbo'
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 VARIANT = "fp16"
 TORCH_DTYPE = torch.float16
 GUIDANCE_SCALE = 0  # Higher guidance scale for better prompt adherence
-INFERENCE_STEPS = 2  # 4 for lcm (high quality), 2 for turbo
+INFERENCE_STEPS = 5  # 4 for lcm (high quality), 2 for turbo
 DEFAULT_NOISE_STRENGTH = 0.5  # 0.5 or 0.7 works well too
 CONDITIONING_SCALE = 0.7  # 0.5 or 0.7 works well too
 GUIDANCE_START = 0.0
 GUIDANCE_END = 1.0
 RANDOM_SEED = 21
-HEIGHT = 512
-WIDTH = 512
+HEIGHT = 768
+WIDTH = 768
 
 # Create threading locks for the pipeline and settings
 pipeline_lock = threading.Lock()
 settings_lock = threading.Lock()
-last_generated_image_lock = threading.Lock()
 
 # Define the settings Pydantic model
 class Settings(BaseModel):
@@ -131,8 +136,7 @@ def prepare_sdxlturbo_pipeline():
     try:
         # Load the depth ControlNet model
         controlnet = ControlNetModel.from_pretrained(
-            "diffusers/controlnet-depth-sdxl-1.0-small",
-            variant="fp16",
+            "lllyasviel/control_v11f1p_sd15_depth",
             use_safetensors=True,
             torch_dtype=torch.float16,
         )
@@ -140,31 +144,23 @@ def prepare_sdxlturbo_pipeline():
     except Exception as e:
         print(f"Error loading ControlNet model: {e}")
         return None
+   
 
     try:
-        vae = AutoencoderTiny.from_pretrained(
-            'madebyollin/taesdxl',
-            use_safetensors=True,
-            torch_dtype=torch.float16,
-        ).to(TORCH_DEVICE)
-        print("VAE model loaded.")
-    except Exception as e:
-        print(f"Error loading VAE model: {e}")
-        return None
-
-    try:
-        pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
-            SDXLTURBO_MODEL_LOCATION,
+        pipe = StableDiffusionControlNetPipeline.from_single_file(
+            "models/epiCrealism/epiCRealism.safetensors",
             controlnet=controlnet,
-            vae=vae,
             variant=VARIANT,
             use_safetensors=True,
             torch_dtype=TORCH_DTYPE,
+            safety_checker=True
         ).to(TORCH_DEVICE)
-
-        pipe.load_ip_adapter("h94/IP-Adapter", subfolder="sdxl_models", weight_name="ip-adapter_sdxl.bin")
-        pipe.set_ip_adapter_scale(0.6)
-
+        
+        print("Pipeline loaded.")
+        print("Lora weights loaded.")
+        pipe.load_lora_weights("models/loras/LCM_LoRA_Weights_SD15.safetensors", use_safetensors=True)
+        pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+ 
 
         #helper = DeepCacheSDHelper(pipe=pipe)
         #helper.set_params(cache_interval=3, cache_branch_id=0)
@@ -229,26 +225,21 @@ def prepare_sdxlturbo_pipeline():
 
 def run_sdxlturbo(pipeline, source_image, control_image, generator, prompt, num_inference_steps, strength, conditioning_scale):
     global last_generated_image
-    ipimage = None
-    with last_generated_image_lock:
-        if last_generated_image is not None:
-            ipimage = last_generated_image
-        else:
-            ipimage = Image.new('RGB', (512, 512), 'white')
+    
 
+    latent = torch.zeros((1,4,96,96),dtype=torch.float16, device="cuda")
     try:
         gen_image = pipeline(
             prompt=prompt,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=GUIDANCE_SCALE,  # Keeping it as default
+            negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+            num_inference_steps=6,
+            guidance_scale=2,  # Keeping it as default
             width=WIDTH,
             height=HEIGHT,
-            generator=generator,
-            image=source_image,                # Source image
-            control_image=control_image,        # Control image (depth map)
-            strength=strength,
-            controlnet_conditioning_scale=conditioning_scale,
-            ip_adapter_image=source_image
+            latents= latent,
+            image = control_image,
+            generator=generator,                # Control image (depth map)
+            controlnet_conditioning_scale=0.5
         ).images[0]
         print("Pipeline successfully generated image.")
         return gen_image
@@ -290,9 +281,12 @@ async def startup_event():
     print("Models loaded successfully.")
 
 # Set a concurrency limit
-MAX_CONCURRENT_PROCESSES = 10  # Adjust based on your GPU capacity
+MAX_CONCURRENT_PROCESSES = 1  # Adjust based on your GPU capacity
 processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PROCESSES)
 
+
+
+"""
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -321,15 +315,16 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close()
         print("WebSocket closed.")
 
+
 async def process_and_send_frame(data, websocket):
-    """
+   
     Process a single frame and send the result back to the client.
     Implements a timeout of 200 ms for both acquiring the semaphore and processing the frame.
     If either step exceeds 200 ms, the frame is dropped.
-    """
+ 
     try:
         # Attempt to acquire the semaphore with a 200 ms timeout
-        await asyncio.wait_for(processing_semaphore.acquire(), timeout=1)
+        await asyncio.wait_for(processing_semaphore.acquire(), timeout=0.1)
     except asyncio.TimeoutError:
         print("Processing queue is full. Dropping frame.")
         return
@@ -362,6 +357,7 @@ async def process_and_send_frame(data, websocket):
     finally:
         # Release the semaphore regardless of processing outcome
         processing_semaphore.release()
+"""
 
 def process_frame(data):
     """
@@ -426,10 +422,7 @@ def process_frame(data):
                 return None
             else:
                 print("Image successfully generated by pipeline.")
-            
-            global last_generated_image
-            with last_generated_image_lock:
-                last_generated_image = gen_image
+
 
         # Convert the generated image back to a numpy array and encode it as JPEG
         result_image = np.array(gen_image)
