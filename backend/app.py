@@ -52,10 +52,10 @@ SDXLTURBO_MODEL_LOCATION = 'models/sdxl-turbo'
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 VARIANT = "fp16"
 TORCH_DTYPE = torch.float16
-GUIDANCE_SCALE = 0  # Higher guidance scale for better prompt adherence
-INFERENCE_STEPS = 5  # 4 for lcm (high quality), 2 for turbo
-DEFAULT_NOISE_STRENGTH = 0.5  # 0.5 or 0.7 works well too
-CONDITIONING_SCALE = 0.7  # 0.5 or 0.7 works well too
+GUIDANCE_SCALE = 2  # Higher guidance scale for better prompt adherence
+INFERENCE_STEPS = 6  # 4 for lcm (high quality), 2 for turbo
+DEFAULT_NOISE_STRENGTH = 0.0  # 0.5 or 0.7 works well too
+CONDITIONING_SCALE = 0.8  # 0.5 or 0.7 works well too
 GUIDANCE_START = 0.0
 GUIDANCE_END = 1.0
 RANDOM_SEED = 21
@@ -152,8 +152,7 @@ def prepare_sdxlturbo_pipeline():
             controlnet=controlnet,
             variant=VARIANT,
             use_safetensors=True,
-            torch_dtype=TORCH_DTYPE,
-            safety_checker=True
+            torch_dtype=TORCH_DTYPE
         ).to(TORCH_DEVICE)
         
         print("Pipeline loaded.")
@@ -226,20 +225,20 @@ def prepare_sdxlturbo_pipeline():
 def run_sdxlturbo(pipeline, source_image, control_image, generator, prompt, num_inference_steps, strength, conditioning_scale):
     global last_generated_image
     
-
+    guidance = 6 * strength + 2
     latent = torch.zeros((1,4,96,96),dtype=torch.float16, device="cuda")
     try:
         gen_image = pipeline(
             prompt=prompt,
             negative_prompt=DEFAULT_NEGATIVE_PROMPT,
-            num_inference_steps=6,
+            num_inference_steps=num_inference_steps,
             guidance_scale=2,  # Keeping it as default
             width=WIDTH,
             height=HEIGHT,
             latents= latent,
             image = control_image,
             generator=generator,                # Control image (depth map)
-            controlnet_conditioning_scale=0.5
+            controlnet_conditioning_scale=float(conditioning_scale)
         ).images[0]
         print("Pipeline successfully generated image.")
         return gen_image
@@ -281,10 +280,52 @@ async def startup_event():
     print("Models loaded successfully.")
 
 # Set a concurrency limit
-MAX_CONCURRENT_PROCESSES = 1  # Adjust based on your GPU capacity
+MAX_CONCURRENT_PROCESSES = 4  # Adjust based on your GPU capacity
 processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PROCESSES)
 
+@app.post("/process")
+async def process_image(file: UploadFile = File(...)):
+    """
+    Endpoint to process an uploaded image and return the processed image.
+    """
+    if file.content_type.split('/')[0] != 'image':
+        raise HTTPException(status_code=400, detail="Invalid image file")
 
+    try:
+        # Read the image bytes
+        data = await file.read()
+        print(f"Received image: {file.filename} ({len(data)} bytes)")
+
+        # Acquire the semaphore to respect concurrency limits
+        try:
+            await asyncio.wait_for(processing_semaphore.acquire(), timeout=10.0)
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=503, detail="Server is busy. Please try again later.")
+
+        # Process the image in a separate thread to avoid blocking
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(process_frame, data),
+                timeout=60.0  # Adjust timeout as needed
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="Image processing timed out.")
+        except Exception as e:
+            print(f"Exception during image processing: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error during image processing.")
+        finally:
+            # Release the semaphore
+            processing_semaphore.release()
+
+        if result is None:
+            raise HTTPException(status_code=500, detail="Failed to process the image.")
+
+        # Return the processed image as a response with appropriate headers
+        return Response(content=result, media_type="image/jpeg")
+
+    except Exception as e:
+        print(f"Error in /process endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error.")
 
 """
 @app.websocket("/ws")
