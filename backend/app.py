@@ -24,6 +24,9 @@ from DeepCache import DeepCacheSDHelper
 from pydantic import BaseModel
 from typing import Optional
 from sfast.compilers.diffusion_pipeline_compiler import (compile, CompilationConfig)
+import time
+from diffusers.pipelines.stable_diffusion_safe import SafetyConfig
+from diffusers.pipelines.stable_diffusion_safe.safety_checker import SafeStableDiffusionSafetyChecker
 
 app = FastAPI()
 
@@ -45,8 +48,8 @@ depth_estimator = None  # Updated
 image_processor = None   # Updated
 run_model = None
 
-DEFAULT_PROMPT = "Architecture, city, sunshine, day, urban landscape, skyscrapers, scenery, white clouds, buildings, bridges, sky, city lights, blue sky, east_ Asia_ Architecture, mountains, rivers, pagodas, outdoor, trees, tokyo_\\ (City )<lora:20_a:0.2>"
-DEFAULT_NEGATIVE_PROMPT = "water, lake water.,2 faces, cropped image, out of frame, draft, deformed hands, signatures, twisted fingers, double image, long neck, malformed hands, multiple heads, extra limb, poorly drawn hands, missing limb, disfigured, cut-off, low-res, deformed, blurry, bad anatomy, mutation, mutated, floating limbs, disconnected limbs, long body, disgusting, poorly drawn, mutilated, mangled, extra fingers, duplicate artifacts, morbid, gross proportions, missing arms, mutated hands, mutilated hands, malformed, tiling, poorly drawn hands, poorly drawn feet, poorly drawn face, out of frame, extra limbs, disfigured, deformed, body out of frame, bad anatomy, watermark, signature, cut off, low contrast, underexposed, overexposed, bad art, beginner, amateur, distorted face, blurry, draft, grainy."
+PROMPT = "Architecture, city, sunshine, day, urban landscape, skyscrapers, scenery, white clouds, buildings, bridges, sky, city lights, blue sky, east_ Asia_ Architecture, mountains, rivers, pagodas, outdoor, trees, tokyo_\\ (City )<lora:20_a:0.2>"
+NEGATIVE_PROMPT = "nude, people, nsfw, water, lake water.,2 faces, cropped image, out of frame, draft, deformed hands, signatures, twisted fingers, double image, long neck, malformed hands, multiple heads, extra limb, poorly drawn hands, missing limb, disfigured, cut-off, low-res, deformed, blurry, bad anatomy, mutation, mutated, floating limbs, disconnected limbs, long body, disgusting, poorly drawn, mutilated, mangled, extra fingers, duplicate artifacts, morbid, gross proportions, missing arms, mutated hands, mutilated hands, malformed, tiling, poorly drawn hands, poorly drawn feet, poorly drawn face, out of frame, extra limbs, disfigured, deformed, body out of frame, bad anatomy, watermark, signature, cut off, low contrast, underexposed, overexposed, bad art, beginner, amateur, distorted face, blurry, draft, grainy."
 MODEL = "sdxlturbo"  # "lcm" or "sdxlturbo"
 SDXLTURBO_MODEL_LOCATION = 'models/sdxl-turbo'
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -60,7 +63,7 @@ GUIDANCE_START = 0.0
 GUIDANCE_END = 1.0
 RANDOM_SEED = 21
 HEIGHT = 768
-WIDTH = 768
+WIDTH = 512
 
 # Create threading locks for the pipeline and settings
 pipeline_lock = threading.Lock()
@@ -69,6 +72,7 @@ settings_lock = threading.Lock()
 # Define the settings Pydantic model
 class Settings(BaseModel):
     prompt: Optional[str] = None
+    negative_prompt: Optional[str] = None
     seed: Optional[int] = None
     inference_steps: Optional[int] = None
     noise_strength: Optional[float] = None
@@ -152,12 +156,14 @@ def prepare_sdxlturbo_pipeline():
             controlnet=controlnet,
             variant=VARIANT,
             use_safetensors=True,
-            torch_dtype=TORCH_DTYPE
+            safety_checker = SafeStableDiffusionSafetyChecker.from_pretrained("CompVis/stable-diffusion-safety-checker"),
+            torch_dtype=TORCH_DTYPE,
+            requires_safety_checker = True
         ).to(TORCH_DEVICE)
         
         print("Pipeline loaded.")
+        pipe.load_lora_weights("models/loras/LCM_LoRA_Weights_SD15.safetensors", use_safetensors=True, adapter_name="lcm")
         print("Lora weights loaded.")
-        pipe.load_lora_weights("models/loras/LCM_LoRA_Weights_SD15.safetensors", use_safetensors=True)
         pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
  
 
@@ -222,15 +228,18 @@ def prepare_sdxlturbo_pipeline():
     pipeline = pipe
     return pipeline
 
-def run_sdxlturbo(pipeline, source_image, control_image, generator, prompt, num_inference_steps, strength, conditioning_scale):
+def run_sdxlturbo(pipeline, source_image, control_image, generator, prompt, negative_prompt, num_inference_steps, strength, conditioning_scale):
     global last_generated_image
     
     guidance = 6 * strength + 2
-    latent = torch.zeros((1,4,96,96),dtype=torch.float16, device="cuda")
+    # (1,4,HEIGHT,WIDTH)
+    l_height = int(HEIGHT/8)
+    l_width = int(WIDTH/8)
+    latent = torch.zeros((1,4,l_height,l_width),dtype=torch.float16, device="cuda")
     try:
         gen_image = pipeline(
             prompt=prompt,
-            negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+            negative_prompt=negative_prompt,
             num_inference_steps=num_inference_steps,
             guidance_scale=2,  # Keeping it as default
             width=WIDTH,
@@ -238,7 +247,8 @@ def run_sdxlturbo(pipeline, source_image, control_image, generator, prompt, num_
             latents= latent,
             image = control_image,
             generator=generator,                # Control image (depth map)
-            controlnet_conditioning_scale=float(conditioning_scale)
+            controlnet_conditioning_scale=float(conditioning_scale),
+            **SafetyConfig.MAX
         ).images[0]
         print("Pipeline successfully generated image.")
         return gen_image
@@ -280,11 +290,12 @@ async def startup_event():
     print("Models loaded successfully.")
 
 # Set a concurrency limit
-MAX_CONCURRENT_PROCESSES = 4  # Adjust based on your GPU capacity
+MAX_CONCURRENT_PROCESSES = 2  # Adjust based on your GPU capacity
 processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PROCESSES)
 
 @app.post("/process")
 async def process_image(file: UploadFile = File(...)):
+    time_requesst_start = time.perf_counter()
     """
     Endpoint to process an uploaded image and return the processed image.
     """
@@ -298,16 +309,24 @@ async def process_image(file: UploadFile = File(...)):
 
         # Acquire the semaphore to respect concurrency limits
         try:
-            await asyncio.wait_for(processing_semaphore.acquire(), timeout=10.0)
+            start_time = time.perf_counter()
+            await asyncio.wait_for(processing_semaphore.acquire(), timeout=1.3)
+            end_time = time.perf_counter()
+            elapsed_time_ms = (end_time - start_time) * 1000
+            print(f"Time taken for acquiring semaphore: {elapsed_time_ms:.2f} ms")
         except asyncio.TimeoutError:
             raise HTTPException(status_code=503, detail="Server is busy. Please try again later.")
 
         # Process the image in a separate thread to avoid blocking
         try:
+            start_time = time.perf_counter()
             result = await asyncio.wait_for(
                 asyncio.to_thread(process_frame, data),
-                timeout=60.0  # Adjust timeout as needed
+                timeout=1.3  # Adjust timeout as needed
             )
+            end_time = time.perf_counter()
+            elapsed_time_ms = (end_time - start_time) * 1000
+            print(f"Time taken for image processing: {elapsed_time_ms:.2f} ms")
         except asyncio.TimeoutError:
             raise HTTPException(status_code=504, detail="Image processing timed out.")
         except Exception as e:
@@ -321,6 +340,9 @@ async def process_image(file: UploadFile = File(...)):
             raise HTTPException(status_code=500, detail="Failed to process the image.")
 
         # Return the processed image as a response with appropriate headers
+        time_requesst_end = time.perf_counter()
+        elapsed_time_ms_request = (time_requesst_end - time_requesst_start) * 1000
+        print(f"Time taken for whole request: {elapsed_time_ms_request:.2f} ms")
         return Response(content=result, media_type="image/jpeg")
 
     except Exception as e:
@@ -408,7 +430,8 @@ def process_frame(data):
     try:
         # Read current settings
         with settings_lock:
-            prompt = DEFAULT_PROMPT
+            prompt = PROMPT
+            negative_prompt = NEGATIVE_PROMPT
             seed = RANDOM_SEED
             inference_steps = INFERENCE_STEPS
             noise_strength = DEFAULT_NOISE_STRENGTH
@@ -454,6 +477,7 @@ def process_frame(data):
                 control_image,
                 generator,
                 prompt=prompt,
+                negative_prompt=negative_prompt,
                 num_inference_steps=inference_steps,
                 strength=noise_strength,
                 conditioning_scale=conditioning_scale,
@@ -486,6 +510,7 @@ def update_settings(settings: Settings):
     """
     Update the generation settings. Clients can send any combination of the following:
     - prompt (str)
+    - negative_prompt (str)
     - seed (int)
     - inference_steps (int)
     - noise_strength (float)
@@ -493,11 +518,14 @@ def update_settings(settings: Settings):
     
     If a setting is not provided, the default value remains unchanged.
     """
-    global DEFAULT_PROMPT, RANDOM_SEED, INFERENCE_STEPS, DEFAULT_NOISE_STRENGTH, CONDITIONING_SCALE
+    global PROMPT, NEGATIVE_PROMPT, RANDOM_SEED, INFERENCE_STEPS, DEFAULT_NOISE_STRENGTH, CONDITIONING_SCALE
     with settings_lock:
         if settings.prompt is not None:
-            DEFAULT_PROMPT = settings.prompt
-            print(f"Updated prompt to: {DEFAULT_PROMPT}")
+            PROMPT = settings.prompt
+            print(f"Updated prompt to: {PROMPT}")
+        if settings.prompt is not None:
+            NEGATIVE_PROMPT = settings.negative_prompt
+            print(f"Updated negative prompt to: {NEGATIVE_PROMPT}")
         if settings.seed is not None:
             RANDOM_SEED = settings.seed
             print(f"Updated seed to: {RANDOM_SEED}")
