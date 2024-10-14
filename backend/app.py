@@ -6,7 +6,6 @@ from diffusers import (
     StableDiffusionXLControlNetImg2ImgPipeline,
     StableDiffusionControlNetPipeline,
     ControlNetModel,
-    AutoencoderTiny,
     LCMScheduler,
     DPMSolverMultistepScheduler,
     DiffusionPipeline,
@@ -27,6 +26,7 @@ from sfast.compilers.diffusion_pipeline_compiler import (compile, CompilationCon
 import time
 from diffusers.pipelines.stable_diffusion_safe import SafetyConfig
 from diffusers.pipelines.stable_diffusion_safe.safety_checker import SafeStableDiffusionSafetyChecker
+import gc
 
 app = FastAPI()
 
@@ -49,9 +49,8 @@ image_processor = None   # Updated
 run_model = None
 
 PROMPT = "Architecture, city, sunshine, day, urban landscape, skyscrapers, scenery, white clouds, buildings, bridges, sky, city lights, blue sky, east_ Asia_ Architecture, mountains, rivers, pagodas, outdoor, trees, tokyo_\\ (City )<lora:20_a:0.2>"
-NEGATIVE_PROMPT = "nude, people, nsfw, water, lake water.,2 faces, cropped image, out of frame, draft, deformed hands, signatures, twisted fingers, double image, long neck, malformed hands, multiple heads, extra limb, poorly drawn hands, missing limb, disfigured, cut-off, low-res, deformed, blurry, bad anatomy, mutation, mutated, floating limbs, disconnected limbs, long body, disgusting, poorly drawn, mutilated, mangled, extra fingers, duplicate artifacts, morbid, gross proportions, missing arms, mutated hands, mutilated hands, malformed, tiling, poorly drawn hands, poorly drawn feet, poorly drawn face, out of frame, extra limbs, disfigured, deformed, body out of frame, bad anatomy, watermark, signature, cut off, low contrast, underexposed, overexposed, bad art, beginner, amateur, distorted face, blurry, draft, grainy."
-MODEL = "sdxlturbo"  # "lcm" or "sdxlturbo"
-SDXLTURBO_MODEL_LOCATION = 'models/sdxl-turbo'
+NEGATIVE_PROMPT = "nsfw, nude, people, person, water, lake water.,2 faces, cropped image, out of frame, draft, deformed hands, signatures, twisted fingers, double image, long neck, malformed hands, multiple heads, extra limb, poorly drawn hands, missing limb, disfigured, cut-off, low-res, deformed, blurry, bad anatomy, mutation, mutated, floating limbs, disconnected limbs, long body, disgusting, poorly drawn, mutilated, mangled, extra fingers, duplicate artifacts, morbid, gross proportions, missing arms, mutated hands, mutilated hands, malformed, tiling, poorly drawn hands, poorly drawn feet, poorly drawn face, out of frame, extra limbs, disfigured, deformed, body out of frame, bad anatomy, watermark, signature, cut off, low contrast, underexposed, overexposed, bad art, beginner, amateur, distorted face, blurry, draft, grainy."
+MODEL_NAME = "epiCRealism"
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 VARIANT = "fp16"
 TORCH_DTYPE = torch.float16
@@ -64,10 +63,21 @@ GUIDANCE_END = 1.0
 RANDOM_SEED = 21
 HEIGHT = 768
 WIDTH = 512
+CONTROL_GUIDANCE_START = 0.0
+CONTROL_GUIDANCE_END = 1.0
 
 # Create threading locks for the pipeline and settings
 pipeline_lock = threading.Lock()
 settings_lock = threading.Lock()
+
+
+model_paths = {
+    "epiCRealism": "models/epiCrealism/epiCRealism.safetensors",
+    "DreamShaper8-LCM": "models/DreamShaper/DreamShaper8-LCM.safetensors",
+    #"DreamShaper8": "models/DreamShaper/DreamShaper8.safetensors",
+    "RealisticVisionV5-1-Hyper": "models/RealisticVision/RealisticVisionV5-1-Hyper.safetensors",
+    "Deliberate_v6-SFW": "models/Deliberate/Deliberate_v6-SFW.safetensors"
+}
 
 # Define the settings Pydantic model
 class Settings(BaseModel):
@@ -77,6 +87,15 @@ class Settings(BaseModel):
     inference_steps: Optional[int] = None
     noise_strength: Optional[float] = None
     conditioning_scale: Optional[float] = None
+    height: Optional[int] = None
+    width: Optional[int] = None
+    control_guidance_start: Optional[float] = None
+    control_guidance_end: Optional[float] = None
+
+
+class ModelRequest(BaseModel):
+    model_name: str
+
 
 def prepare_seed(seed: int):
     generator = torch.Generator(device=TORCH_DEVICE)
@@ -135,8 +154,19 @@ def get_depth_map(image, contrast_factor=1.5):
         print(f"Error generating depth map with Depth Anything: {e}")
         return None
 
+def delete_pipeline(pipeline):
+    try:
+        del pipeline
+        torch.cuda.empty_cache()
+        gc.collect()
+        print("Pipeline deleted.")
+    except Exception as e:
+        print(f"Error deleting pipeline: {e}")
+        return None
 
-def prepare_sdxlturbo_pipeline():
+
+def prepare_pipeline(model = MODEL_NAME):
+    start_loading = time.time()
     try:
         # Load the depth ControlNet model
         controlnet = ControlNetModel.from_pretrained(
@@ -149,10 +179,16 @@ def prepare_sdxlturbo_pipeline():
         print(f"Error loading ControlNet model: {e}")
         return None
    
-
+    path = model_paths.get(model)
+    
     try:
         pipe = StableDiffusionControlNetPipeline.from_single_file(
-            "models/epiCrealism/epiCRealism.safetensors",
+            path,
+            #"models/epiCrealism/epiCRealism.safetensors",
+            #"models/DreamShaper/DreamShaper8-LCM.safetensors",
+            #"models/DreamShaper/DreamShaper8.safetensors",
+            #"models/RealisticVision/RealisticVisionV5-1-Hyper.safetensors",
+            #"models/Deliberate/Deliberate_v6-SFW.safetensors",
             controlnet=controlnet,
             variant=VARIANT,
             use_safetensors=True,
@@ -162,15 +198,21 @@ def prepare_sdxlturbo_pipeline():
         ).to(TORCH_DEVICE)
         
         print("Pipeline loaded.")
-        pipe.load_lora_weights("models/loras/LCM_LoRA_Weights_SD15.safetensors", use_safetensors=True, adapter_name="lcm")
-        print("Lora weights loaded.")
+        if "LCM" not in path:
+            try:
+                pipe.load_lora_weights("models/loras/LCM_LoRA_Weights_SD15.safetensors", use_safetensors=True, adapter_name="lcm")
+                print("Lora weights loaded.")
+            except Exception as e: 
+                print(f"Error loading Lora weights: {e}")
+
         pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
  
 
         #helper = DeepCacheSDHelper(pipe=pipe)
         #helper.set_params(cache_interval=3, cache_branch_id=0)
         #helper.enable()
-
+        end_loading = time.time()
+        print(f"Loading took {end_loading - start_loading} seconds.")
         print("Pipeline loaded and moved to device.")
     except Exception as e:
         print(f"Error loading pipeline: {e}")
@@ -228,13 +270,15 @@ def prepare_sdxlturbo_pipeline():
     pipeline = pipe
     return pipeline
 
-def run_sdxlturbo(pipeline, source_image, control_image, generator, prompt, negative_prompt, num_inference_steps, strength, conditioning_scale):
+def run_pipeline(pipeline, source_image, control_image, generator, prompt, negative_prompt, num_inference_steps, 
+                  strength=2.0, conditioning_scale=1.0, height=512, width=512, control_guidance_start=0.0, control_guidance_end=1.0):
     global last_generated_image
     
-    guidance = 6 * strength + 2
+    guidance = 2 * strength + 1
+    _conditioning_scale = float(0.35*conditioning_scale+0.5)
     # (1,4,HEIGHT,WIDTH)
-    l_height = int(HEIGHT/8)
-    l_width = int(WIDTH/8)
+    l_height = int(height/8)
+    l_width = int(width/8)
     latent = torch.zeros((1,4,l_height,l_width),dtype=torch.float16, device="cuda")
     try:
         gen_image = pipeline(
@@ -242,12 +286,14 @@ def run_sdxlturbo(pipeline, source_image, control_image, generator, prompt, nega
             negative_prompt=negative_prompt,
             num_inference_steps=num_inference_steps,
             guidance_scale=2,  # Keeping it as default
-            width=WIDTH,
-            height=HEIGHT,
+            width=width,
+            height=height,
             latents= latent,
             image = control_image,
             generator=generator,                # Control image (depth map)
             controlnet_conditioning_scale=float(conditioning_scale),
+            control_guidance_start = control_guidance_start,
+            control_guidance_end = control_guidance_end,
             **SafetyConfig.MAX
         ).images[0]
         print("Pipeline successfully generated image.")
@@ -275,7 +321,7 @@ async def startup_event():
         raise e
 
     try:
-        pipeline = prepare_sdxlturbo_pipeline()
+        pipeline = prepare_pipeline()
         if pipeline is None:
             print("Failed to load pipeline.")
             raise RuntimeError("Pipeline loading failed.")
@@ -286,7 +332,7 @@ async def startup_event():
         raise e
 
     # Assign run_model based on the model type
-    run_model = run_sdxlturbo
+    run_model = run_pipeline
     print("Models loaded successfully.")
 
 # Set a concurrency limit
@@ -436,6 +482,10 @@ def process_frame(data):
             inference_steps = INFERENCE_STEPS
             noise_strength = DEFAULT_NOISE_STRENGTH
             conditioning_scale = CONDITIONING_SCALE
+            height = HEIGHT
+            width = WIDTH
+            control_guidance_start = CONTROL_GUIDANCE_START
+            control_guidance_end = CONTROL_GUIDANCE_END
 
         # Convert the received bytes to a numpy array
         nparr = np.frombuffer(data, np.uint8)
@@ -481,6 +531,10 @@ def process_frame(data):
                 num_inference_steps=inference_steps,
                 strength=noise_strength,
                 conditioning_scale=conditioning_scale,
+                height=height,
+                width=width,
+                control_guidance_start=control_guidance_start,
+                control_guidance_end=control_guidance_end
             )
             if gen_image is None:
                 print("Generated image is None.")
@@ -515,10 +569,15 @@ def update_settings(settings: Settings):
     - inference_steps (int)
     - noise_strength (float)
     - conditioning_scale (float)
+    - height (int)
+    - width (int)
+    - control_guidance_start (float)
+    - control_guidance_end (float)
     
     If a setting is not provided, the default value remains unchanged.
     """
-    global PROMPT, NEGATIVE_PROMPT, RANDOM_SEED, INFERENCE_STEPS, DEFAULT_NOISE_STRENGTH, CONDITIONING_SCALE
+    global PROMPT, NEGATIVE_PROMPT, RANDOM_SEED, INFERENCE_STEPS, DEFAULT_NOISE_STRENGTH
+    global CONDITIONING_SCALE, WIDTH, HEIGHT, CONTROL_GUIDANCE_START, CONTROL_GUIDANCE_END
     with settings_lock:
         if settings.prompt is not None:
             PROMPT = settings.prompt
@@ -538,4 +597,40 @@ def update_settings(settings: Settings):
         if settings.conditioning_scale is not None:
             CONDITIONING_SCALE = settings.conditioning_scale
             print(f"Updated conditioning scale to: {CONDITIONING_SCALE}")
+        if settings.height is not None:
+            HEIGHT = settings.height
+            print(f"Updated height to: {HEIGHT}")
+        if settings.width is not None:
+            WIDTH = settings.width
+            print(f"Updated width to: {WIDTH}")
+        if settings.control_guidance_start is not None:
+            CONTROL_GUIDANCE_START = settings.control_guidance_start
+            print(f"Updated controlnet guidance start to: {CONTROL_GUIDANCE_START}")
+        if settings.control_guidance_end is not None:
+            CONTROL_GUIDANCE_END = settings.control_guidance_end
+            print(f"Updated controlnet guidance end to: {CONTROL_GUIDANCE_END}")
+        
     return {"status": "Settings updated successfully."}
+
+
+# Request model for the /change_model endpoint
+
+# Define the POST endpoint /change_model
+@app.post("/change_model")
+async def change_model(request: ModelRequest):
+    global MODEL_NAME
+    model_name = request.model_name
+    # Check if the model name exists in model_paths
+    if model_name == MODEL_NAME:
+        return {"status": "Chosen model is already selected."}
+
+    if model_name in model_paths:
+        global pipeline
+        with pipeline_lock:
+            delete_pipeline(pipeline)
+            prepare_pipeline(model_name)
+
+        return {"status": "Model changed successfully."}
+    else:
+        # Raise a 404 error if the model name does not exist
+        raise HTTPException(status_code=404, detail="Model name not found")
